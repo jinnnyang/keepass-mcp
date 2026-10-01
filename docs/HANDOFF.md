@@ -11,7 +11,9 @@
 
 开发一个 **KeePass 2.x 原生插件**，在本机（localhost）暴露一个 **MCP 服务**（Streamable HTTP 传输），使本地 AI Agent（标准 MCP 客户端）能**读取和修改数据库中除掩码字段外的所有字段**——重命名、重新分类（移动分组）、编辑 URL/备注/自定义字段、分组与标签管理、搜索、审计。**密码等受保护字段对 Agent 不可见、不可操作。**
 
-**绝不实现**：返回任何受保护字段明文；修改主密钥；导出数据库；任何绕过掩码的路径。
+**绝不实现**：除审批通过的 `read_secret` 单次返回外，返回任何受保护字段明文；修改主密钥；导出数据库；任何绕过掩码的路径。
+
+**密钥边界（2026-10-01 访谈定稿，ADR-0001/0002）**：创建新条目时可写入保护字段值（`create_entry` 的 `fields` 或 `generate_password`，免审批）；读取已有保护字段明文（`read_secret`）与修改已有保护字段需**密钥访问审批**（白名单免审批 + KeePass UI 弹窗，超时拒绝，§6.6）；任何读出口/资源/审计/备份永不含保护字段明文。
 
 ---
 
@@ -19,7 +21,7 @@
 
 | 项 | 约束 | 说明 |
 |----|------|------|
-| 宿主 | KeePass 2.x（目标 2.61.x，向下兼容 2.5x+） | 插件 API：`KeePass.Plugins.Plugin` 基类 |
+| 宿主 | KeePass 2.x（本机验证目标 2.60.0 便携版：`C:\Programs\KeePass\2.60.0\windows\amd64`；代码保持 2.5x+ 兼容） | 插件 API：`KeePass.Plugins.Plugin` 基类；引用便携版目录下 KeePassLib.dll 编译 |
 | 运行时 | **.NET Framework 4.8**（KeePass 2.x 当前目标） | 非现代 .NET |
 | UI | WinForms（复用 KeePass 主窗口） | 插件不新建主窗体 |
 | 数据访问 | 直接引用 **KeePassLib**（插件内可用） | PwDatabase/PwGroup/PwEntry/ProtectedStringDictionary |
@@ -65,6 +67,12 @@ flowchart LR
 
 **统一出口**：所有读工具/资源经同一个 `MaskedEntrySerializer` 序列化，杜绝遗漏路径（§8 EntryDto）。
 
+**审批例外（2026-10-01，ADR-0001/0002）**：
+- `create_entry` 可携带保护字段值（`fields` 传值或 `generate_password` 插件内生成），免审批；生成路径明文不经 Agent 上下文
+- `read_secret`：读取保护字段明文，白名单条目免审批、非白名单走弹窗审批；返回明文仅此一次，审计逐字段记录
+- `update_entry_fields`：请求含保护字段名时，未审批 → 整体拒绝 `{ok:false, error:{code:"approval_required"}}`；审批通过 → 允许
+- 任何读出口/审计/备份不得包含明文（不变量）
+
 ---
 
 ## 4. MCP 工具规格（Tools）
@@ -99,6 +107,14 @@ flowchart LR
 输出: data: EntryDto（§8；掩码字段值恒为 "[protected]"）
 ```
 
+**`read_secret`**（密钥访问，需审批）
+```
+输入: {database_id: string, entry_uuid: string, fields?: string[]}   // fields 缺省=全部保护字段
+审批: 白名单条目免审批；非白名单 → KeePass UI 弹窗，60s 超时拒绝（§6.6）
+输出: data: {fields: {field_name: 明文}}   // 明文仅此一次返回，审计逐字段记录
+拒绝: {ok:false, error:{code:"approval_denied" | "approval_timeout"}}
+```
+
 **`search_entries`**
 ```
 输入: {database_id: string, query: string, scope?: "title"|"url"|"notes"|"all"(默认 all)}
@@ -121,7 +137,7 @@ flowchart LR
 **`update_entry_fields`**
 ```
 输入: {database_id, entry_uuid, fields: {field_name: string_value}, dry_run?}
-约束: 出现掩码字段名 → 拒绝；空 fields → 拒绝
+约束: 出现掩码字段名 → 需密钥访问审批（白名单/弹窗，§6.6），未审批则整体拒绝 approval_required；空 fields → 拒绝
 ```
 
 **`move_entry`**（重新分类）
@@ -131,8 +147,8 @@ flowchart LR
 
 **`create_entry`**
 ```
-输入: {database_id, group_uuid, title, fields?: {非保护字段}, dry_run?}
-约束: 无密码字段（Password 不在 schema）；创建后不含保护字段
+输入: {database_id, group_uuid, title, fields?: {字段: 值}, generate_password?: {length: int, charset?: string}, dry_run?}
+约束: fields 可含保护字段（Agent 传值，免审批，ADR-0001）；generate_password 由插件用 KeePass PasswordGenerator 生成并直接落库（明文不经 Agent 上下文，主推路径）；dry-run 预览中保护字段值显示 [protected]
 ```
 
 **`create_group`** / **`rename_group`**
@@ -229,6 +245,14 @@ ping                              → {}
 - 库处于锁定态：该库相关工具/资源返回 `{ok:false, error:{code:"database_locked"}}`
 - 全部库锁定：服务仍响应 initialize/ping/list_databases（locked:true），其余拒绝
 
+### 6.6 密钥访问审批（2026-10-01 定稿，ADR-0001/0002）〔决策〕
+- 两级审批：
+  1. **密钥访问白名单**：按条目 UUID 配置（插件选项页可增删），白名单内条目对 `read_secret`/保护字段更新免审批，全程审计
+  2. **KeePass UI 弹窗**：非白名单条目，在 `host.MainWindow` 弹确认框（显示库名/条目标题/字段名/操作类型），**默认 60s 超时按拒绝**；拒绝与超时均不返回明文
+- 弹窗必须 marshal 到 UI 线程（§2 线程模型），且请求线程阻塞等待用户决策
+- 所有审批事件（允许/拒绝/超时）写审计日志；审计与备份永不包含明文
+- 只读工具不触发审批（`get_entry`/资源仍输出 [protected]）
+
 ---
 
 ## 7. 审计与备份〔决策〕
@@ -238,6 +262,7 @@ ping                              → {}
 {"ts":"2026-10-01T12:00:00Z","tool":"rename_entry","args":{"entry_uuid":"...","new_title":"..."},"target":"<uuid>","result":"ok","error":null,"dry_run":false}
 ```
 - 写工具无论 dry_run 与否都记录（dry_run 记录 `dry_run:true`）
+- `read_secret` 每次访问记录（含审批结果）；审批事件（允许/拒绝/超时）单独记录
 - 只读工具不记录（避免噪音；可配置记录）
 
 **备份**：写操作执行前，自动把涉及条目的**非保护字段快照**（不含任何保护字段明文）写入 `%APPDATA%\KeePassMCP\backups\<timestamp>_<tool>_<uuid>.json`：
@@ -308,6 +333,11 @@ ping                              → {}
 - [ ] 多库打开时 database_id 路由正确
 - [ ] `backup_database` 产出快照；`restore_backup` 回滚非保护字段（保护字段不受影响）
 - [ ] 后台线程压力下（并发请求）KeePass 不卡死、不崩溃（UI 线程 marshal 验证）
+- [ ] `create_entry` 携带 Password → 创建成功；`get_entry` 显示 [protected]；审计记录
+- [ ] `create_entry` generate_password → 生成值落库，全响应无明文（grep 验证）
+- [ ] `read_secret` 白名单条目 → 返回明文一次 + 审计逐字段；非白名单 → 弹窗；拒绝/超时 → 不返回明文
+- [ ] `update_entry_fields` 含保护字段未审批 → approval_required；审批通过 → 更新 + 审计
+- [ ] 审计 JSONL 与备份 JSON grep 无任何保护字段明文
 
 ---
 
@@ -333,7 +363,7 @@ ping                              → {}
 
 ## 13. 实施顺序建议
 
-1. **P0 验证**（半天内）：MCP SDK 在 4.8 跑通最小 echo（或确认手写）；HttpListener 绑定 localhost 成功
+1. **P0 验证**（半天内）：MCP SDK 在 4.8 跑通最小 echo（或确认手写）；HttpListener 绑定 localhost 成功；便携版 2.60.0 加载插件骨架
 2. **P1 只读**：插件骨架 + token 鉴权 + 锁定态 + list/get/search + 资源 + 掩码序列化器
-3. **P2 写操作**：dry-run 框架 + rename/move/字段/分组/标签 + 审计 + 备份
-4. **P3 打磨**：多库、配置 UI、restore、并发健壮性、验收清单全绿
+3. **P2 写操作**：dry-run 框架 + rename/move/字段/分组/标签 + create_entry（含密钥写入）+ 审计 + 备份
+4. **P3 密钥访问与打磨**：read_secret + 密钥访问白名单 + UI 弹窗审批 + 多库、配置 UI、restore、并发健壮性、验收清单全绿
