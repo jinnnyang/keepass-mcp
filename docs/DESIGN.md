@@ -155,7 +155,7 @@ flowchart LR
 |----|------|------|
 | 插件宿主 | KeePass 2.x 插件 API（`KeePass.Plugins.Plugin`） | 官方插件体系，可访问 KeePassLib |
 | 运行时 | .NET Framework 4.8（KeePass 2.x 当前目标） | 兼容性前提 |
-| MCP 实现 | 首选官方 C# SDK（ModelContextProtocol，netstandard2.0 兼容目标）；不可用则手写最小协议（initialize/tools/list/tools/call/resources/list/read + Streamable HTTP 传输） | 〔待验证〕SDK 在 .NET Framework 4.8 的可用性 |
+| MCP 实现 | 官方 C# SDK（ModelContextProtocol **2.2.0**，netstandard2.0 目标）〔P0-a 已验证 2026-10-01〕 | net48 加载运行成功；传输用 StreamServerTransport + HttpListener 适配 |
 | HTTP 宿主 | Kestrel（若 SDK 支持）或 HttpListener（.NET Framework 原生，最稳） | 〔待验证〕 |
 | 数据访问 | KeePassLib（PwDatabase/PwGroup/PwEntry/ProtectedStringDictionary） | 插件内直接引用 |
 | 掩码判定 | `PwEntry.Strings` 中 `ProtectedString.IsProtected` | 原生 API |
@@ -165,12 +165,13 @@ flowchart LR
 
 ## 8. 风险与待验证
 
-1. **MCP C# SDK 在 .NET Framework 4.8 的可用性**（官方 SDK 面向现代 .NET，可能需 netstandard2.0 变体或自研最小实现）〔待验证〕
-2. **插件与 KeePass 主程序线程模型**：MCP HTTP 服务在后台线程跑，操作 KeePassLib 需注意 UI 线程同步（KeePass 大量 API 假设在 UI 线程）〔待验证〕
+1. **MCP C# SDK 在 .NET Framework 4.8 的可用性** → **已解决（P0-a）**：ModelContextProtocol 2.2.0 带 netstandard2.0 目标，net48 加载运行正常；P1 需验证 StreamServerTransport + HttpListener 的接线
+2. **插件与 KeePass 主程序线程模型**：MCP HTTP 服务在后台线程跑，操作 KeePassLib 需注意 UI 线程同步（KeePass 大量 API 假设在 UI 线程）〔待验证〕——弹窗审批（P3）前必须验证
 3. **多库支持**：KeePass 支持多文档，工具需明确 `database_id` 参数〔设计〕
 4. **KDBX 4.1 自定义数据/标签**：标签与公共自定义数据的读写 API 需核对〔待验证〕
 5. **Agent 误操作防护**：批量移动/重命名仍可能造成用户不期望的变更 → 备份+审计+（可选）dry-run 预览参数〔设计〕
 6. **与 KeePassRPC 端口冲突/生态并存**：默认端口随机可避免冲突〔设计〕
+7. **KeePass 2.60 插件加载门槛**（P0-b2 新发现）：插件 DLL 的 ProductName 必须为 "KeePass Plugin"，否则静默跳过；PluginCompatibility 为自动缓存非白名单〔已解决，见 HANDOFF §9.2〕
 
 ---
 
@@ -205,10 +206,10 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P0 验证）
+## 12. 下一步（P1 只读）
 
-设计边界已两轮访谈定稿（含密钥访问模型），进入最小验证：
-1. 验证 MCP C# SDK 在 .NET Framework 4.8 的加载（或确认需手写最小协议）
-2. KeePass 插件骨架加载 MCP 服务（HttpListener echo）成功——便携版 2.60.0 已就位（`C:\Programs\KeePass\2.60.0\windows\amd64`）
-3. 掩码判定 API（`ProtectedString.IsProtected`）在 KeePassLib 中实测
-4. 弹窗审批的 UI 线程 marshal 可行性验证（归入 P2 审批实现前置）
+P0 已全部验证通过（2026-10-01）：SDK 2.2.0 net48 加载 ✓ / HttpListener 非管理员随机端口绑定 ✓ / 插件在便携版 2.60.0 加载 ✓ / 掩码判定 API ✓。进入 **P1 只读**（按 HANDOFF §13）：
+1. 插件骨架内启动 MCP HTTP 服务（StreamServerTransport + HttpListener 适配），`initialize`/`ping` 跑通
+2. token 生成/持久化/校验（%APPDATA%\KeePassMCP\token）
+3. 锁定联动 + list_databases/list_groups/list_entries/get_entry/search_entries + 资源 URI
+4. MaskedEntrySerializer 掩码序列化器（P0-c 已确认 API 形态）

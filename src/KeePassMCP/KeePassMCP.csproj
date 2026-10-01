@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>KeePassMCP</RootNamespace>
+    <AssemblyName>KeePassMCP</AssemblyName>
+    <!-- KeePass 加载门槛：DLL 文件版本信息 ProductName 必须等于 "KeePass Plugin"，否则静默跳过（PluginManager.LoadPlugins） -->
+    <Product>KeePass Plugin</Product>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- KeePass 2.60.0 便携版：KeePassLib 已合并进 KeePass.exe（无独立 KeePassLib.dll），故直接引用 exe -->
+    <Reference Include="KeePass">
+      <HintPath>C:\Programs\KeePass\2.60.0\windows\amd64\KeePass.exe</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>
