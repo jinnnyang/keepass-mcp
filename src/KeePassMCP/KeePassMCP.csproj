@@ -7,9 +7,15 @@
     <!-- KeePass 加载门槛：DLL 文件版本信息 ProductName 必须等于 "KeePass Plugin"，否则静默跳过（PluginManager.LoadPlugins） -->
     <Product>KeePass Plugin</Product>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- 插件依赖（System.Text.Json 等）须与插件 DLL 同目录输出，部署到 Plugins\KeePassMCP\ 子目录 -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <!-- KeePass 插件内 JSON 序列化用 Newtonsoft.Json（零依赖）：System.Text.Json 系在 net48 无
+         binding redirect 时 Unsafe 版本冲突（STJ/Encodings.Web 要 6.0.0.0，System.Memory 要 4.0.4.1，
+         GAC 无、KeePass.exe.config 无 redirect 不可改），已实测确认。KeePassRPC 同款方案。 -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
   <ItemGroup>
     <!-- KeePass 2.60.0 便携版：KeePassLib 已合并进 KeePass.exe（无独立 KeePassLib.dll），故直接引用 exe -->
@@ -17,5 +23,7 @@
       <HintPath>C:\Programs\KeePass\2.60.0\windows\amd64\KeePass.exe</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- net48 显式引用 WinForms（UiInvoke 经 MainForm.Invoke） -->
+    <Reference Include="System.Windows.Forms" />
   </ItemGroup>
 </Project>

@@ -155,8 +155,9 @@ flowchart LR
 |----|------|------|
 | 插件宿主 | KeePass 2.x 插件 API（`KeePass.Plugins.Plugin`） | 官方插件体系，可访问 KeePassLib |
 | 运行时 | .NET Framework 4.8（KeePass 2.x 当前目标） | 兼容性前提 |
-| MCP 实现 | 官方 C# SDK（ModelContextProtocol **2.2.0**，netstandard2.0 目标）〔P0-a 已验证 2026-10-01〕 | net48 加载运行成功；传输用 StreamServerTransport + HttpListener 适配 |
-| HTTP 宿主 | Kestrel（若 SDK 支持）或 HttpListener（.NET Framework 原生，最稳） | 〔待验证〕 |
+| MCP 实现 | **手写最小协议（JSON-RPC 2.0 + HttpListener）〔P1 已落地 2026-10-02〕**：官方 SDK 2.2.0 可加载但其 HTTP 传输是 ASP.NET Core 生态（无公开传输类型、需 Kestrel），net48 不可用 → 按 HANDOFF §6.2 既定回退手写 | initialize/ping/tools/list/call、resources/list/read；无状态 |
+| JSON 序列化 | **Newtonsoft.Json 13.0.3（零依赖）〔P1 实证〕** | STJ 系在 net48 无 binding redirect 时 Unsafe 版本冲突（STJ/Encodings.Web 要 6.0.0.0、System.Memory 要 4.0.4.1），KeePass 环境不可改 config |
+| HTTP 宿主 | HttpListener（.NET Framework 原生）〔已落地〕 | 127.0.0.1 随机端口，非管理员可绑（P0-b1 实证）；WWW-Authenticate 受限头不能直接赋值 |
 | 数据访问 | KeePassLib（PwDatabase/PwGroup/PwEntry/ProtectedStringDictionary） | 插件内直接引用 |
 | 掩码判定 | `PwEntry.Strings` 中 `ProtectedString.IsProtected` | 原生 API |
 | Agent 连接形态（已确认） | **标准 MCP 客户端配置**：客户端配置文件声明 `type: http` + `url: http://127.0.0.1:<端口>` + `headers: {Authorization: Bearer <token>}`；token 由插件生成后供用户粘贴进配置 | 〔设计〕✓已决 |
@@ -165,13 +166,14 @@ flowchart LR
 
 ## 8. 风险与待验证
 
-1. **MCP C# SDK 在 .NET Framework 4.8 的可用性** → **已解决（P0-a）**：ModelContextProtocol 2.2.0 带 netstandard2.0 目标，net48 加载运行正常；P1 需验证 StreamServerTransport + HttpListener 的接线
-2. **插件与 KeePass 主程序线程模型**：MCP HTTP 服务在后台线程跑，操作 KeePassLib 需注意 UI 线程同步（KeePass 大量 API 假设在 UI 线程）〔待验证〕——弹窗审批（P3）前必须验证
-3. **多库支持**：KeePass 支持多文档，工具需明确 `database_id` 参数〔设计〕
-4. **KDBX 4.1 自定义数据/标签**：标签与公共自定义数据的读写 API 需核对〔待验证〕
+1. **MCP C# SDK 在 .NET Framework 4.8 的可用性** → **已解决（P0-a + P1）**：SDK 2.2.0 可加载，但 HTTP 传输属 ASP.NET Core 生态（无公开传输类型、DI builder、需 Kestrel），net48 不可用 → 已手写最小协议并集成验证（initialize/tools/resources 全通）
+2. **插件与 KeePass 主程序线程模型**：P1 已实现 KeePassFacade.UiInvoke（MainForm.Invoke 同步 marshal）并在真实 KeePass 进程验证（服务在后台线程跑、KeePassLib 操作经 UI 线程）〔已验证〕——弹窗审批（P3）将复用同一机制
+3. **多库支持**：KeePass 支持多文档，工具需明确 `database_id` 参数〔设计，P1 已按 path 路由〕
+4. **KDBX 4.1 自定义数据/标签**：标签与公共自定义数据的读写 API 已核对（PwEntry.Tags/CustomData）〔已核〕
 5. **Agent 误操作防护**：批量移动/重命名仍可能造成用户不期望的变更 → 备份+审计+（可选）dry-run 预览参数〔设计〕
 6. **与 KeePassRPC 端口冲突/生态并存**：默认端口随机可避免冲突〔设计〕
 7. **KeePass 2.60 插件加载门槛**（P0-b2 新发现）：插件 DLL 的 ProductName 必须为 "KeePass Plugin"，否则静默跳过；PluginCompatibility 为自动缓存非白名单〔已解决，见 HANDOFF §9.2〕
+8. **插件依赖解析**（P1 新发现）：带依赖的插件须整体放 Plugins\ 子目录（KeePass 解析不到平铺依赖）；STJ Unsafe 版本冲突 → Newtonsoft 零依赖〔已解决，见 HANDOFF §9.2/§1〕
 
 ---
 
@@ -206,10 +208,12 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P1 只读）
+## 12. 下一步（P2 写操作）
 
-P0 已全部验证通过（2026-10-01）：SDK 2.2.0 net48 加载 ✓ / HttpListener 非管理员随机端口绑定 ✓ / 插件在便携版 2.60.0 加载 ✓ / 掩码判定 API ✓。进入 **P1 只读**（按 HANDOFF §13）：
-1. 插件骨架内启动 MCP HTTP 服务（StreamServerTransport + HttpListener 适配），`initialize`/`ping` 跑通
-2. token 生成/持久化/校验（%APPDATA%\KeePassMCP\token）
-3. 锁定联动 + list_databases/list_groups/list_entries/get_entry/search_entries + 资源 URI
-4. MaskedEntrySerializer 掩码序列化器（P0-c 已确认 API 形态）
+**P1 只读已完成（2026-10-02）**：手写 MCP 服务（initialize/ping/tools/list/call、resources/list/read）+ token 鉴权 + Host 白名单 + 锁定态 + 5 个只读工具 + 掩码序列化器；逻辑探针 42/42，KeePass 集成验证全绿（401/403/405/-32601/-32700、协议协商、5 工具、list_databases 信封）。工程：`src/KeePassMCP`（插件）+ `src/P1Probe.Tools`（逻辑探针）。**待用户验证**：真实开库后 list_databases/get_entry 返回真实数据（UI 联动未自动化）。
+
+进入 **P2 写操作**（按 HANDOFF §13）：
+1. dry-run 预览框架 + 写操作审计日志
+2. rename/move/字段修改/分组管理/标签（白名单自主 + 全局确认开关）
+3. create_entry（创建时可写入密钥，免审批）
+4. backup_database 快照

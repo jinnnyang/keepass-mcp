@@ -21,12 +21,13 @@
 
 | 项 | 约束 | 说明 |
 |----|------|------|
-| 宿主 | KeePass 2.x（本机验证目标 2.60.0 便携版：`C:\Programs\KeePass\2.60.0\windows\amd64`；代码保持 2.5x+ 兼容） | 插件 API：`KeePass.Plugins.Plugin` 基类；引用便携版目录下 KeePassLib.dll 编译 |
+| 宿主 | KeePass 2.x（本机验证目标 2.60.0 便携版：`C:\Programs\KeePass\2.60.0\windows\amd64`；代码保持 2.5x+ 兼容） | 插件 API：`KeePass.Plugins.Plugin` 基类；引用 KeePass.exe（2.60 起 KeePassLib 并入 exe） |
 | 运行时 | **.NET Framework 4.8**（KeePass 2.x 当前目标） | 非现代 .NET |
 | UI | WinForms（复用 KeePass 主窗口） | 插件不新建主窗体 |
 | 数据访问 | **引用 KeePass.exe（2.60 起 KeePassLib 合并进 KeePass.exe，无独立 KeePassLib.dll，P0 已核实）** | PwDatabase/PwGroup/PwEntry/ProtectedStringDictionary |
-| MCP 实现 | **官方 C# SDK（ModelContextProtocol 2.2.0，netstandard2.0 目标）〔P0-a 已验证 2026-10-01〕**；传输接线：`StreamServerTransport` + HttpListener 适配（SDK 为 DI 风格 builder） | 若接线不顺可回退 §6.2 手写最小协议（协议已规格化） |
-| HTTP 宿主 | **HttpListener**（.NET Framework 原生）〔建议〕 | 若 MCP SDK 自带 Kestrel 且能在 4.8 跑通，可用；否则 HttpListener 最稳 |
+| MCP 实现 | **手写最小协议（JSON-RPC 2.0 + HttpListener，§6.2）〔P1 已落地并集成验证 2026-10-02〕**：官方 SDK 2.2.0 在 P0-a 可加载，但其 HTTP 传输是 ASP.NET Core 生态（核心包无公开传输类型、纯 DI builder、需 Kestrel），net48 不可用 → 按既定回退手写 | 协议面小、完全可控：initialize/ping/tools/list/call、resources/list/read；无状态（不维护会话，通知回 202） |
+| JSON 序列化 | **Newtonsoft.Json 13.0.3（零依赖）〔P1 实证〕** | System.Text.Json 系在 net48 无 binding redirect 时 Unsafe 版本冲突：STJ/Encodings.Web 要 6.0.0.0、System.Memory 要 4.0.4.1，GAC 无、KeePass.exe.config 不可改；STJ 6.x 亦不例外 |
+| HTTP 宿主 | **HttpListener**（.NET Framework 原生）〔已落地〕 | 127.0.0.1 随机端口；注意 WWW-Authenticate 是受限响应头不能直接赋值（P1 实测） |
 | 目标 | 单机插件（非跨平台优先） | Windows 为本项目目标平台 |
 
 ---
@@ -306,6 +307,7 @@ ping                              → {}
 
 1. **插件骨架**：`public sealed class KeePassMCPExt : Plugin`；`Initialize(IPluginHost host)` 启动服务；`Terminate()` 停止并释放。
 2. **部署门槛（2.60 实测，P0-b2）**：插件 DLL 的**文件版本信息 ProductName 必须等于 `"KeePass Plugin"`**（`AppDefs.PluginProductName`），否则 `PluginManager.LoadPlugins` 静默跳过（SDK 风格 csproj 加 `<Product>KeePass Plugin</Product>`）。`KeePass.config.xml` 的 `PluginCompatibility` 是**检查通过后的自动缓存**（`SetPluginCompatible`），非白名单，无需手工登记。
+3. **依赖部署（P1 实证）**：插件有依赖 DLL 时，**整体放 Plugins\ 的子目录**（如 `Plugins\KeePassMCP\KeePassMCP.dll` + 依赖），不能平铺放 Plugins\ 根（KeePass 进程解析不到依赖 → 弹"未能加载文件或程序集"）。工程加 `<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>` 把依赖拷进输出目录后整体复制。
 3. **获取数据库**：`host.MainWindow.ActiveDatabase`（PwDatabase）；多库场景遍历 `host.MainWindow.DocumentManager`（以实际 API 为准）。
 4. **写后保存**〔决策〕：操作后设 `database.Modified = true`，**不强制自动写盘**——由 KeePass 正常保存流程（Ctrl+S / 关闭提示）落盘；`backup_database` 提供显式快照。
 5. **分组/条目操作**：PwGroup.Entries / PwGroup.Groups 的 Add/Remove 维护父子关系；移动条目 = 从旧组移除 + 加入目标组（保留 PwEntry 对象）。
@@ -346,11 +348,13 @@ ping                              → {}
 
 | 风险 | 影响 | 缓解 |
 |------|------|------|
-| MCP C# SDK 无法在 .NET Framework 4.8 加载 | 需手写协议 | **已解决（P0-a）**：ModelContextProtocol 2.2.0 的 netstandard2.0 目标可在 net48 加载运行；若 P1 传输接线不顺再按 §6.2 手写 |
-| KeePassLib 线程安全 | 崩溃/数据损坏 | 严格 UI 线程 marshal（§2） |
+| MCP C# SDK 无法在 .NET Framework 4.8 加载 | 需手写协议 | **已解决（P0-a + P1）**：SDK 2.2.0 可加载但其传输是 ASP.NET Core 生态（无公开传输类型、需 Kestrel），net48 不可用 → 已按 §6.2 手写并集成验证 |
+| KeePassLib 线程安全 | 崩溃/数据损坏 | 严格 UI 线程 marshal（§2）；P1 已实现 KeePassFacade.UiInvoke（MainForm.Invoke） |
 | KeePass API 版本差异（2.5x vs 2.61） | 编译/运行错误 | 本机验证目标 = 2.60.0 便携版；接口用稳定的公开 API |
 | HttpListener URL ACL | 端口绑定失败（非管理员） | **已解决（P0-b1）**：127.0.0.1 随机端口非管理员实测绑定成功，无需 `netsh http add urlacl` |
 | 插件被 KeePass 静默跳过 | 插件不加载 | **已解决（P0-b2）**：DLL ProductName 必须为 "KeePass Plugin"（§9.2） |
+| 插件依赖程序集解析不到 | 弹"未能加载文件或程序集" | **已解决（P1）**：依赖与插件同放 Plugins\ 子目录；JSON 用 Newtonsoft（零依赖）规避 Unsafe 版本冲突（§9.2 / §1） |
+| HttpListener 响应头 WWW-Authenticate | 401 分支抛 ArgumentException → 500 | **已解决（P1）**：WWW-Authenticate 是受限头不能直接赋值，401 只设 StatusCode |
 | 保护字段误判 | 泄露 | 三层防御：Password 硬掩码 + IsProtected + 配置清单；验收标准含明文 grep |
 
 ---
@@ -366,6 +370,6 @@ ping                              → {}
 ## 13. 实施顺序建议
 
 1. **P0 验证** ~~（半天内）~~ **已完成 2026-10-01**：MCP SDK 2.2.0 net48 加载 ✓；HttpListener 127.0.0.1 随机端口非管理员绑定 ✓；插件骨架在便携版 2.60.0 加载触发 Initialize ✓；`ProtectedString.IsProtected` 掩码判定 ✓。工程：`src/KeePassMCP`（插件）+ `src/P0Probe.*`（验证探针，保留可复跑）
-2. **P1 只读**：插件骨架 + token 鉴权 + 锁定态 + list/get/search + 资源 + 掩码序列化器
+2. **P1 只读** ~~进行中~~ **已完成 2026-10-02**：手写 MCP 服务（initialize/ping/tools/list/call、resources/list/read）+ token 鉴权（32B CSPRNG 持久化 %APPDATA%\KeePassMCP\token，恒定时间比较）+ Host 白名单 + 锁定态（请求时 IsOpen 判定）+ list_databases/list_groups/list_entries/get_entry/search_entries + 资源 URI + 掩码序列化器。逻辑探针 42/42（P1Probe.Tools）；KeePass 集成验证全绿（401/403/405/-32601/-32700/initialize 协议协商/tools 5 个/list_databases 信封）。**待用户验证**：真实开库后 list_databases 返回库与条目（探针已用真实 PwDatabase 覆盖，UI 联动未自动化）
 3. **P2 写操作**：dry-run 框架 + rename/move/字段/分组/标签 + create_entry（含密钥写入）+ 审计 + 备份
 4. **P3 密钥访问与打磨**：read_secret + 密钥访问白名单 + UI 弹窗审批 + 多库、配置 UI、restore、并发健壮性、验收清单全绿

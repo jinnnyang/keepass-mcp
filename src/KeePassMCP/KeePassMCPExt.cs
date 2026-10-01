@@ -1,32 +1,45 @@
 using System;
-using System.IO;
 using KeePass.Plugins;
+using KeePassMCP.Core;
+using KeePassMCP.MCP;
 
 namespace KeePassMCP
 {
     /// <summary>
-    /// KeePassMCP 插件入口（P0 骨架）。
-    /// P0-b 验证目标：KeePass 2.60.0 加载本程序集并触发 Initialize/Terminate。
-    /// P1 起在此启动 MCP HTTP 服务（HttpListener, 127.0.0.1）。
+    /// KeePassMCP 插件入口（P1：只读 MCP 服务）。
+    /// Initialize 启动 HttpListener 服务（127.0.0.1 随机端口 + Bearer token）；
+    /// Terminate 停止服务并释放。
     /// </summary>
     public sealed class KeePassMCPExt : Plugin
     {
-        private static readonly string MarkerPath =
-            Path.Combine(Path.GetTempPath(), "keepassmcp-p0.log");
-
-        private IPluginHost _host;
+        private McpServerHost _server;
 
         public override bool Initialize(IPluginHost host)
         {
-            _host = host;
-            File.AppendAllText(MarkerPath,
-                $"[{DateTime.Now:O}] KeePassMCP Initialize (host={host.GetType().FullName})\n");
-            return true;
+            try
+            {
+                _server = new McpServerHost(host);
+                _server.Start();
+                Log.Write("KeePassMCP initialized");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Write("KeePassMCP Initialize FAILED: " + ex);
+                _server = null;
+                return false;
+            }
         }
 
         public override void Terminate()
         {
-            File.AppendAllText(MarkerPath, $"[{DateTime.Now:O}] KeePassMCP Terminate\n");
+            try
+            {
+                _server?.Stop();
+                _server = null;
+                Log.Write("KeePassMCP terminated");
+            }
+            catch { }
         }
     }
 }

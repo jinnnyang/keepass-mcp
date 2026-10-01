@@ -2,7 +2,7 @@
 
 **KeePass 原生 MCP 插件**：对本机暴露 MCP 服务（Streamable HTTP），本地 Agent 连接后**可见/可操作除掩码字段外的所有字段**——重新分类、重新命名、整理元数据，密码等受保护字段在协议层、实现层、数据层三层不可达。
 
-> 状态：**设计定稿（含密钥访问边界）、P0 验证全部通过，进入 P1**。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
+> 状态：**设计定稿（含密钥访问边界）；P0 验证、P1 只读均完成，进入 P2**。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
 
 ## 一句话定位
 
@@ -43,7 +43,7 @@ keepass-mcp/
 ├── docs/DESIGN.md      # 设计方案（决策记录）
 ├── docs/HANDOFF.md     # ★实施交接文档（编码会话直接读这份）
 ├── docs/adr/           # ADR-0001 密钥边界模型 / ADR-0002 审批机制
-├── src/                # 插件工程 + P0 验证探针（KeePassMCP.sln）
+├── src/                # 插件工程 + P0/P1 探针（KeePassMCP.sln：KeePassMCP、P0Probe.*、P1Probe.Tools）
 └── README.md
 ```
 
@@ -57,4 +57,4 @@ keepass-mcp/
 
 ## 下一步
 
-P0 已通过（2026-10-01）：SDK 2.2.0 net48 ✓、HttpListener 非管理员绑定 ✓、插件加载便携版 2.60.0 ✓、掩码 API ✓。按 [docs/HANDOFF.md](docs/HANDOFF.md) §13 推进：**P1 只读**（MCP 服务 + token + 锁定态 + list/get/search + 掩码序列化器）→ P2 写操作 → P3 密钥访问与打磨。
+**P0**（SDK/HttpListener/插件加载/掩码 API）与 **P1 只读**（手写 MCP 服务 + token 鉴权 + 锁定态 + 5 个只读工具 + 掩码序列化器；逻辑探针 42/42、KeePass 集成验证全绿）已完成（2026-10-02）。按 [docs/HANDOFF.md](docs/HANDOFF.md) §13 推进：**P2 写操作**（dry-run + 白名单自主 + create_entry 密钥写入 + 备份）→ P3 密钥访问与打磨（read_secret + 白名单 + UI 弹窗审批）。
