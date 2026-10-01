@@ -1,0 +1,581 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using KeePassLib;
+using KeePassLib.Cryptography;
+using KeePassLib.Cryptography.PasswordGenerator;
+using KeePassLib.Security;
+using Newtonsoft.Json.Linq;
+
+namespace KeePassMCP.Core
+{
+    /// <summary>
+    /// 写工具核心（P2，HANDOFF §4.2/§7）。
+    /// 统一语义：每个写操作 = 计算变更列表（预览） + 执行（apply）。
+    /// dry_run=true → 只返回 {dry_run:true, changes, summary}，零副作用（不落库/不备份/不审计）。
+    /// dry_run=false → 写前快照 → apply → db.Modified=true → 审计 → {dry_run:false, changes, summary, executed:true}。
+    /// 不变量：审计 args 由各工具构造为安全参数（不含保护字段明文）；备份经掩码序列化器。
+    /// 调用方（ToolRegistry）必须将写操作 marshal 到 UI 线程执行。
+    /// </summary>
+    public static class WriteHandlers
+    {
+        // ================= 确认开关（Q3：全局"写需确认"） =================
+        public static bool ConfirmWritesRequired()
+        {
+            try
+            {
+                if (!System.IO.File.Exists(ConfigPaths.ConfigFile)) return false;
+                var cfg = JObject.Parse(System.IO.File.ReadAllText(ConfigPaths.ConfigFile));
+                return cfg.Value<bool?>("confirm_writes") == true;
+            }
+            catch { return false; }
+        }
+
+        private static Dictionary<string, object> RequireConfirm(bool confirm)
+        {
+            return (ConfirmWritesRequired() && !confirm)
+                ? ToolHandlers.Err("confirmation_required", "全局写需确认开关已开启，此写操作需要 confirm:true")
+                : null;
+        }
+
+        // ================= rename_entry =================
+        public static Dictionary<string, object> RenameEntry(PwDatabase db, string entryUuid, string newTitle,
+            bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(newTitle))
+                return ToolHandlers.Err("invalid_params", "new_title 不能为空");
+            PwEntry entry = FindEntry(db, entryUuid);
+            if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+
+            string oldTitle = entry.Strings.ReadSafe("Title");
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "rename",
+                ["target"] = Target(entry),
+                ["old"] = oldTitle,
+                ["new"] = newTitle
+            };
+            return RunWrite(db, "rename_entry", entryUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () => { entry.Strings.Set("Title", new ProtectedString(false, newTitle)); entry.Touch(true); },
+                new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["new_title"] = newTitle });
+        }
+
+        // ================= update_entry_fields =================
+        public static Dictionary<string, object> UpdateEntryFields(PwDatabase db, string entryUuid,
+            Dictionary<string, string> fields, bool confirm, bool dryRun, ISet<string> extraMasked)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (fields == null || fields.Count == 0)
+                return ToolHandlers.Err("invalid_params", "fields 不能为空");
+            PwEntry entry = FindEntry(db, entryUuid);
+            if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+
+            foreach (var kv in fields)
+            {
+                if (IsProtectedFieldName(entry, kv.Key, extraMasked))
+                    return ToolHandlers.Err("approval_required",
+                        $"字段 '{kv.Key}' 是受保护字段，修改需密钥访问审批（P3 提供；当前阶段整体拒绝，库无变化）");
+            }
+
+            var changes = new List<Dictionary<string, object>>();
+            foreach (var kv in fields)
+            {
+                string oldValue = entry.Strings.ReadSafe(kv.Key);
+                changes.Add(new Dictionary<string, object>
+                {
+                    ["action"] = "update_field",
+                    ["target"] = Target(entry),
+                    ["old"] = oldValue,
+                    ["new"] = kv.Value
+                });
+            }
+            // 审计安全参数：只列字段名，不记字段值（值可能含敏感信息，统一不记录）
+            var safeArgs = new Dictionary<string, object>
+            {
+                ["entry_uuid"] = entryUuid,
+                ["fields"] = fields.Keys.Select(k => k + ":[set]").ToList()
+            };
+            return RunWrite(db, "update_entry_fields", entryUuid, dryRun, changes,
+                () =>
+                {
+                    foreach (var kv in fields)
+                    {
+                        entry.Strings.Set(kv.Key, new ProtectedString(false, kv.Value));
+                    }
+                    entry.Touch(true);
+                }, safeArgs);
+        }
+
+        // ================= move_entry =================
+        public static Dictionary<string, object> MoveEntry(PwDatabase db, string entryUuid, string targetGroupUuid,
+            bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            PwEntry entry = FindEntry(db, entryUuid);
+            if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            PwGroup target = FindGroup(db, targetGroupUuid);
+            if (target == null) return ToolHandlers.Err("group_not_found", $"分组 {targetGroupUuid} 未找到");
+            if (entry.ParentGroup != null && entry.ParentGroup.Uuid.Equals(target.Uuid))
+                return ToolHandlers.Err("no_op", "条目已在目标分组");
+
+            string oldGroup = entry.ParentGroup != null ? GroupPath(entry.ParentGroup) : "(无父组)";
+            string newGroup = GroupPath(target);
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "move",
+                ["target"] = Target(entry),
+                ["old_group"] = oldGroup,
+                ["new_group"] = newGroup
+            };
+            return RunWrite(db, "move_entry", entryUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () =>
+                {
+                    if (entry.ParentGroup != null) entry.ParentGroup.Entries.Remove(entry);
+                    // KeePass 2.60：PwGroup.AddEntry 只加入列表，不更新 ParentGroup（setter 为 internal）→ 反射设置
+                    target.Entries.Add(entry);
+                    SetParentGroup(entry, target);
+                    entry.Touch(true);
+                },
+                new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["target_group_uuid"] = targetGroupUuid });
+        }
+
+        // ================= create_entry（含密钥写入，免审批） =================
+        public static Dictionary<string, object> CreateEntry(PwDatabase db, string groupUuid, string title,
+            Dictionary<string, string> fields, JToken generatePassword, bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(title))
+                return ToolHandlers.Err("invalid_params", "title 不能为空");
+            PwGroup group = FindGroup(db, groupUuid);
+            if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
+
+            // dry-run 预览用的占位 uuid（执行时才创建对象，保证零副作用）
+            string previewUuid = Guid.NewGuid().ToString("N");
+            var changes = new List<Dictionary<string, object>>
+            {
+                new Dictionary<string, object>
+                {
+                    ["action"] = "create_entry",
+                    ["target"] = new Dictionary<string, object> { ["uuid"] = previewUuid, ["title"] = title },
+                    ["new"] = $"创建条目“{title}”"
+                }
+            };
+            if (fields != null)
+            {
+                foreach (var kv in fields)
+                {
+                    bool prot = IsAlwaysProtectedFieldName(kv.Key);
+                    changes.Add(new Dictionary<string, object>
+                    {
+                        ["action"] = "set_field",
+                        ["target"] = new Dictionary<string, object> { ["uuid"] = previewUuid, ["title"] = title },
+                        ["new"] = prot ? "[protected]" : kv.Value
+                    });
+                }
+            }
+            string genLen = null, genCs = null;
+            if (generatePassword != null)
+            {
+                string invalid = ValidateGeneratePassword(generatePassword);
+                if (invalid != null)
+                    return ToolHandlers.Err("invalid_params", $"generate_password 无效：{invalid}");
+                genLen = generatePassword.Value<int?>("length")?.ToString() ?? "16";
+                genCs = generatePassword.Value<string>("charset") ?? "all";
+                changes.Add(new Dictionary<string, object>
+                {
+                    ["action"] = "generate_password",
+                    ["target"] = new Dictionary<string, object> { ["uuid"] = previewUuid, ["title"] = title },
+                    ["new"] = "[protected]（插件内生成，明文不经 Agent 上下文）"
+                });
+            }
+
+            if (dryRun)
+                return ToolHandlers.Ok(new Dictionary<string, object>
+                {
+                    ["dry_run"] = true, ["changes"] = changes, ["summary"] = BuildSummary(changes)
+                });
+
+            // ---- 执行 ----
+            PwEntry entry = new PwEntry(true, true);
+            SetParentGroup(entry, group);
+            group.Entries.Add(entry);
+            entry.Strings.Set("Title", new ProtectedString(false, title));
+            if (fields != null)
+            {
+                foreach (var kv in fields)
+                {
+                    bool prot = IsAlwaysProtectedFieldName(kv.Key);
+                    entry.Strings.Set(kv.Key, new ProtectedString(prot, kv.Value));
+                }
+            }
+            if (generatePassword != null)
+            {
+                string pw;
+                try { pw = GeneratePassword(generatePassword); }
+                catch (Exception ex) { return ToolHandlers.Err("invalid_params", $"generate_password 无效：{ex.Message}"); }
+                entry.Strings.Set("Password", new ProtectedString(true, pw));
+            }
+            entry.Touch(true);
+
+            // 用真实 uuid 替换预览占位
+            string realUuid = entry.Uuid.ToHexString();
+            foreach (var chg in changes)
+            {
+                if (chg.TryGetValue("target", out object t) && t is Dictionary<string, object> target)
+                    target["uuid"] = realUuid;
+            }
+            db.Modified = true;
+
+            var safeArgs = new Dictionary<string, object>
+            {
+                ["group_uuid"] = groupUuid,
+                ["title"] = title,
+                ["field_names"] = fields != null ? fields.Keys.ToList() : new List<string>(),
+                ["generate_password"] = generatePassword != null
+                    ? new Dictionary<string, object> { ["length"] = genLen, ["charset"] = genCs } : null
+            };
+            AuditLog.Write("create_entry", safeArgs, realUuid, true, null, false);
+            return ToolHandlers.Ok(new Dictionary<string, object>
+            {
+                ["dry_run"] = false, ["changes"] = changes, ["summary"] = BuildSummary(changes), ["executed"] = true,
+                ["entry_uuid"] = realUuid
+            });
+        }
+
+        // ================= create_group =================
+        public static Dictionary<string, object> CreateGroup(PwDatabase db, string parentGroupUuid, string name,
+            bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(name))
+                return ToolHandlers.Err("invalid_params", "name 不能为空");
+            PwGroup parent = FindGroup(db, parentGroupUuid);
+            if (parent == null) return ToolHandlers.Err("group_not_found", $"父分组 {parentGroupUuid} 未找到");
+
+            string previewUuid = Guid.NewGuid().ToString("N");
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "create_group",
+                ["target"] = new Dictionary<string, object> { ["uuid"] = previewUuid, ["name"] = name },
+                ["new"] = $"创建分组“{name}”（父：{parent.Name}）"
+            };
+            return RunWrite(db, "create_group", previewUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () =>
+                {
+                    PwGroup g = new PwGroup(true, true, name, PwIcon.Folder);
+                    parent.AddGroup(g, true);
+                },
+                new Dictionary<string, object> { ["parent_group_uuid"] = parentGroupUuid, ["name"] = name });
+        }
+
+        // ================= rename_group =================
+        public static Dictionary<string, object> RenameGroup(PwDatabase db, string groupUuid, string newName,
+            bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(newName))
+                return ToolHandlers.Err("invalid_params", "new_name 不能为空");
+            PwGroup group = FindGroup(db, groupUuid);
+            if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
+
+            string oldName = group.Name;
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "rename_group",
+                ["target"] = TargetGroup(group),
+                ["old"] = oldName,
+                ["new"] = newName
+            };
+            return RunWrite(db, "rename_group", groupUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () => { group.Name = newName; },
+                new Dictionary<string, object> { ["group_uuid"] = groupUuid, ["new_name"] = newName });
+        }
+
+        // ================= delete_group（破坏性，confirm 硬约束） =================
+        public static Dictionary<string, object> DeleteGroup(PwDatabase db, string groupUuid, bool confirm, bool dryRun)
+        {
+            if (!confirm)
+                return ToolHandlers.Err("confirmation_required", "delete_group 是破坏性操作，需要 confirm:true");
+            PwGroup group = FindGroup(db, groupUuid);
+            if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
+            if (group.ParentGroup == null)
+                return ToolHandlers.Err("invalid_params", "不能删除根分组");
+
+            int entryCount = CountEntries(group);
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "delete_group",
+                ["target"] = TargetGroup(group),
+                ["new"] = $"删除分组“{group.Name}”及其中 {entryCount} 个条目"
+            };
+            return RunWrite(db, "delete_group", groupUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () =>
+                {
+                    group.DeleteAllObjects(db);
+                    group.ParentGroup.Groups.Remove(group);
+                },
+                new Dictionary<string, object> { ["group_uuid"] = groupUuid, ["entry_count"] = entryCount });
+        }
+
+        // ================= add_tag / remove_tag =================
+        public static Dictionary<string, object> AddTag(PwDatabase db, string entryUuid, string tag, bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(tag))
+                return ToolHandlers.Err("invalid_params", "tag 不能为空");
+            PwEntry entry = FindEntry(db, entryUuid);
+            if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            if (entry.HasTag(tag)) return ToolHandlers.Err("no_op", $"条目已有标签 {tag}");
+
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "add_tag", ["target"] = Target(entry), ["new"] = tag
+            };
+            return RunWrite(db, "add_tag", entryUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () => { entry.AddTag(tag); entry.Touch(true); },
+                new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["tag"] = tag });
+        }
+
+        public static Dictionary<string, object> RemoveTag(PwDatabase db, string entryUuid, string tag, bool confirm, bool dryRun)
+        {
+            var req = RequireConfirm(confirm);
+            if (req != null) return req;
+            if (string.IsNullOrWhiteSpace(tag))
+                return ToolHandlers.Err("invalid_params", "tag 不能为空");
+            PwEntry entry = FindEntry(db, entryUuid);
+            if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            if (!entry.HasTag(tag)) return ToolHandlers.Err("no_op", $"条目没有标签 {tag}");
+
+            var change = new Dictionary<string, object>
+            {
+                ["action"] = "remove_tag", ["target"] = Target(entry), ["old"] = tag
+            };
+            return RunWrite(db, "remove_tag", entryUuid, dryRun, new List<Dictionary<string, object>> { change },
+                () => { entry.RemoveTag(tag); entry.Touch(true); },
+                new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["tag"] = tag });
+        }
+
+        // ================= backup_database（显式整库快照） =================
+        public static Dictionary<string, object> BackupDatabase(PwDatabase db)
+        {
+            string path = BackupStore.SnapshotDatabase(db, "backup_database");
+            if (path == null) return ToolHandlers.Err("database_empty", "库为空，无可备份条目");
+            int entryCount = CountEntries(db.RootGroup);
+            string backupId = System.IO.Path.GetFileNameWithoutExtension(path);
+            AuditLog.Write("backup_database",
+                new Dictionary<string, object> { ["database"] = SafeName(db) }, SafeName(db), true, null, false);
+            return ToolHandlers.Ok(new Dictionary<string, object>
+            {
+                ["backup_id"] = backupId,
+                ["path"] = path,
+                ["entry_count"] = entryCount,
+                ["created"] = DateTime.UtcNow.ToString("o")
+            });
+        }
+
+        // ================= 内部框架 =================
+        private static Dictionary<string, object> RunWrite(PwDatabase db, string tool, string targetUuid, bool dryRun,
+            List<Dictionary<string, object>> changes, Action apply, Dictionary<string, object> safeArgs)
+        {
+            if (dryRun)
+                return ToolHandlers.Ok(new Dictionary<string, object>
+                {
+                    ["dry_run"] = true, ["changes"] = changes, ["summary"] = BuildSummary(changes)
+                });
+
+            try { BackupStore.SnapshotForWrite(db, tool, changes); }
+            catch { /* 快照失败不阻断写（审计仍记录） */ }
+
+            try { apply(); }
+            catch (Exception ex)
+            {
+                AuditLog.Write(tool, safeArgs, targetUuid, false, ex.Message, false);
+                return ToolHandlers.Err("operation_failed", $"操作失败：{ex.Message}");
+            }
+
+            db.Modified = true;
+            AuditLog.Write(tool, safeArgs, targetUuid, true, null, false);
+            return ToolHandlers.Ok(new Dictionary<string, object>
+            {
+                ["dry_run"] = false, ["changes"] = changes, ["summary"] = BuildSummary(changes), ["executed"] = true
+            });
+        }
+
+        private static string BuildSummary(List<Dictionary<string, object>> changes)
+        {
+            if (changes == null || changes.Count == 0) return "无变更";
+            var parts = new List<string>();
+            foreach (var g in changes.GroupBy(c => (string)c["action"]))
+            {
+                string verb = g.Key switch
+                {
+                    "rename" => "重命名", "move" => "移动", "update_field" => "更新字段",
+                    "create_entry" => "创建条目", "set_field" => "设置字段",
+                    "generate_password" => "生成并写入密码", "create_group" => "创建分组",
+                    "rename_group" => "重命名分组", "delete_group" => "删除分组",
+                    "add_tag" => "添加标签", "remove_tag" => "移除标签",
+                    _ => g.Key
+                };
+                parts.Add($"{verb} {g.Count()} 项");
+            }
+            return string.Join("，", parts);
+        }
+
+        // ================= 查找与路径 =================
+        private static PwEntry FindEntry(PwDatabase db, string uuidHex)
+        {
+            if (string.IsNullOrEmpty(uuidHex)) return null;
+            return FindEntryRec(db.RootGroup, uuidHex);
+        }
+
+        private static PwEntry FindEntryRec(PwGroup group, string uuidHex)
+        {
+            foreach (PwEntry e in group.Entries)
+                if (string.Equals(e.Uuid.ToHexString(), uuidHex, StringComparison.OrdinalIgnoreCase)) return e;
+            foreach (PwGroup g in group.Groups)
+            {
+                PwEntry found = FindEntryRec(g, uuidHex);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static PwGroup FindGroup(PwDatabase db, string uuidHex)
+        {
+            if (string.IsNullOrEmpty(uuidHex)) return db.RootGroup;
+            return FindGroupRec(db.RootGroup, uuidHex);
+        }
+
+        private static PwGroup FindGroupRec(PwGroup group, string uuidHex)
+        {
+            if (string.Equals(group.Uuid.ToHexString(), uuidHex, StringComparison.OrdinalIgnoreCase)) return group;
+            foreach (PwGroup g in group.Groups)
+            {
+                PwGroup found = FindGroupRec(g, uuidHex);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        internal static string GroupPath(PwGroup group)
+        {
+            if (group == null) return "";
+            var names = new List<string> { group.Name };
+            PwGroup p = group.ParentGroup;
+            while (p != null)
+            {
+                names.Insert(0, p.Name);
+                p = p.ParentGroup;
+            }
+            return string.Join("/", names);
+        }
+
+        private static int CountEntries(PwGroup group)
+        {
+            int n = (int)group.GetEntriesCount(false);
+            foreach (PwGroup g in group.Groups) n += CountEntries(g);
+            return n;
+        }
+
+        private static Dictionary<string, object> Target(PwEntry entry) =>
+            new Dictionary<string, object> { ["uuid"] = entry.Uuid.ToHexString(), ["title"] = entry.Strings.ReadSafe("Title") };
+
+        private static Dictionary<string, object> TargetGroup(PwGroup group) =>
+            new Dictionary<string, object> { ["uuid"] = group.Uuid.ToHexString(), ["name"] = group.Name };
+
+        private static string SafeName(PwDatabase db)
+        {
+            try { return db.Name ?? ""; } catch { return ""; }
+        }
+
+        // ================= 掩码判定（与 MaskedEntrySerializer 一致） =================
+
+        /// <summary>PwEntry.ParentGroup 的 setter 在 KeePass 2.60 为 internal，反射调用（缓存 MethodInfo）。</summary>
+        private static readonly Lazy<System.Reflection.MethodInfo> ParentGroupSetter = new Lazy<System.Reflection.MethodInfo>(() =>
+        {
+            var prop = typeof(PwEntry).GetProperty("ParentGroup");
+            return prop != null ? prop.GetSetMethod(true) : null;
+        });
+
+        private static void SetParentGroup(PwEntry entry, PwGroup group)
+        {
+            var setter = ParentGroupSetter.Value;
+            if (setter == null) throw new InvalidOperationException("PwEntry.ParentGroup setter 不可用");
+            setter.Invoke(entry, new object[] { group });
+        }
+        private static bool IsAlwaysProtectedFieldName(string name) =>
+            string.Equals(name, "Password", StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsProtectedFieldName(PwEntry entry, string name, ISet<string> extraMasked)
+        {
+            if (IsAlwaysProtectedFieldName(name)) return true;
+            if (extraMasked != null && extraMasked.Contains(name)) return true;
+            ProtectedString ps = entry.Strings.Get(name);
+            return ps != null && ps.IsProtected;
+        }
+
+        // ================= generate_password（插件内生成，明文不经 Agent 上下文） =================
+        /// <summary>前置校验（dry-run 与执行共用），返回错误描述或 null。避免执行时半创建残留。</summary>
+        private static string ValidateGeneratePassword(JToken args)
+        {
+            int length = args.Value<int?>("length") ?? 16;
+            if (length < 4 || length > 128) return "length 需在 4..128 之间";
+            string charset = args.Value<string>("charset") ?? "all";
+            if (string.IsNullOrEmpty(ResolveCharset(charset))) return $"不支持的 charset：{charset}";
+            return null;
+        }
+
+        private static string GeneratePassword(JToken args)
+        {
+            int length = args.Value<int?>("length") ?? 16;
+            string charset = args.Value<string>("charset") ?? "all";
+            string charSetStr = ResolveCharset(charset);
+            if (string.IsNullOrEmpty(charSetStr))
+                throw new ArgumentException($"不支持的 charset：{charset}");
+
+            var cs = new PwCharSet(charSetStr);
+            var profile = new PwProfile
+            {
+                Length = (uint)length,
+                CharSet = cs,
+                GeneratorType = PasswordGeneratorType.CharSet,
+                ExcludeLookAlike = true
+            };
+            var entropy = new byte[64];
+            using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+                rng.GetBytes(entropy);
+
+            ProtectedString ps;
+            PwgError err = PwGenerator.Generate(out ps, profile, entropy, new CustomPwGeneratorPool());
+            if (err != PwgError.Success)
+                throw new InvalidOperationException($"密码生成失败（PwgError={err}）");
+            return ps.ReadString();
+        }
+
+        private static string ResolveCharset(string charset)
+        {
+            const string lower = "abcdefghijklmnopqrstuvwxyz";
+            const string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            const string digits = "0123456789";
+            const string special = "!@#$%^&*()-_=+[]{};:,.<>?";
+            return charset switch
+            {
+                "all" => lower + upper + digits + special,
+                "alnum" => lower + upper + digits,
+                "lower" => lower,
+                "upper" => upper,
+                "digits" => digits,
+                "special" => special,
+                _ => charset // 自定义字符集：原样使用
+            };
+        }
+    }
+}

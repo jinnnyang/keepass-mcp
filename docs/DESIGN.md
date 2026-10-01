@@ -208,12 +208,12 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P2 写操作）
+## 12. 下一步（P3 密钥访问与打磨）
 
-**P1 只读已完成（2026-10-02）**：手写 MCP 服务（initialize/ping/tools/list/call、resources/list/read）+ token 鉴权 + Host 白名单 + 锁定态 + 5 个只读工具 + 掩码序列化器；逻辑探针 42/42，KeePass 集成验证全绿（401/403/405/-32601/-32700、协议协商、5 工具、list_databases 信封）。工程：`src/KeePassMCP`（插件）+ `src/P1Probe.Tools`（逻辑探针）。**待用户验证**：真实开库后 list_databases/get_entry 返回真实数据（UI 联动未自动化）。
+**P2 写操作已完成（2026-10-02）**：dry-run 框架 + 10 个写工具 + get_audit_log（工具共 16 个）；create_entry 支持受保护字段传值与 generate_password（插件内生成，明文不经 Agent 上下文）；审计 JSONL + 写前备份；全局确认开关。逻辑探针 99/99；KeePass 集成验证（tools/list 16、写工具无库错误路径、get_audit_log）全绿。**待用户验证**：真实开库后写工具在 KeePass UI 的变化。
 
-进入 **P2 写操作**（按 HANDOFF §13）：
-1. dry-run 预览框架 + 写操作审计日志
-2. rename/move/字段修改/分组管理/标签（白名单自主 + 全局确认开关）
-3. create_entry（创建时可写入密钥，免审批）
-4. backup_database 快照
+进入 **P3**（按 HANDOFF §13）：
+1. read_secret + 密钥访问白名单 + KeePass UI 弹窗审批（60s 超时拒绝）
+2. update_entry_fields 保护字段审批接入（替换当前 approval_required 拒绝）
+3. restore_backup、多库/配置 UI、并发健壮性、connection.json 重写确认
+4. HANDOFF §10 验收清单逐项全绿

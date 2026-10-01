@@ -9,6 +9,8 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
     <!-- 探针自用 STJ（控制台工程有自动 binding redirect，可正常运行） -->
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <!-- P2 写工具参数（generate_password 等）用 Newtonsoft JToken -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\KeePassMCP\KeePassMCP.csproj" />

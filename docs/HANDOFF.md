@@ -262,7 +262,7 @@ ping                              → {}
 ```json
 {"ts":"2026-10-01T12:00:00Z","tool":"rename_entry","args":{"entry_uuid":"...","new_title":"..."},"target":"<uuid>","result":"ok","error":null,"dry_run":false}
 ```
-- 写工具无论 dry_run 与否都记录（dry_run 记录 `dry_run:true`）
+- 写工具执行（dry_run=false）记录；**dry_run=true 不写审计**（§4.2「不产生任何副作用」优先于本节第一句，2026-10-02 P2 裁决）
 - `read_secret` 每次访问记录（含审批结果）；审批事件（允许/拒绝/超时）单独记录
 - 只读工具不记录（避免噪音；可配置记录）
 
@@ -307,7 +307,7 @@ ping                              → {}
 
 1. **插件骨架**：`public sealed class KeePassMCPExt : Plugin`；`Initialize(IPluginHost host)` 启动服务；`Terminate()` 停止并释放。
 2. **部署门槛（2.60 实测，P0-b2）**：插件 DLL 的**文件版本信息 ProductName 必须等于 `"KeePass Plugin"`**（`AppDefs.PluginProductName`），否则 `PluginManager.LoadPlugins` 静默跳过（SDK 风格 csproj 加 `<Product>KeePass Plugin</Product>`）。`KeePass.config.xml` 的 `PluginCompatibility` 是**检查通过后的自动缓存**（`SetPluginCompatible`），非白名单，无需手工登记。
-3. **依赖部署（P1 实证）**：插件有依赖 DLL 时，**整体放 Plugins\ 的子目录**（如 `Plugins\KeePassMCP\KeePassMCP.dll` + 依赖），不能平铺放 Plugins\ 根（KeePass 进程解析不到依赖 → 弹"未能加载文件或程序集"）。工程加 `<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>` 把依赖拷进输出目录后整体复制。
+3. **依赖部署（P1 实证）**：插件有依赖 DLL 时，**整体放 Plugins\ 的子目录**（如 `Plugins\KeePassMCP\KeePassMCP.dll` + 依赖），不能平铺放 Plugins\ 根（KeePass 进程解析不到依赖 → 弹"未能加载文件或程序集"）。工程加 `<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>` 把依赖拷进输出目录后整体复制。**升级 DLL 前必须结束 KeePass 进程**（运行中的 KeePass 会锁住插件 DLL，Copy-Item 失败但不报错中止后续步骤）。
 3. **获取数据库**：`host.MainWindow.ActiveDatabase`（PwDatabase）；多库场景遍历 `host.MainWindow.DocumentManager`（以实际 API 为准）。
 4. **写后保存**〔决策〕：操作后设 `database.Modified = true`，**不强制自动写盘**——由 KeePass 正常保存流程（Ctrl+S / 关闭提示）落盘；`backup_database` 提供显式快照。
 5. **分组/条目操作**：PwGroup.Entries / PwGroup.Groups 的 Add/Remove 维护父子关系；移动条目 = 从旧组移除 + 加入目标组（保留 PwEntry 对象）。
@@ -356,6 +356,9 @@ ping                              → {}
 | 插件依赖程序集解析不到 | 弹"未能加载文件或程序集" | **已解决（P1）**：依赖与插件同放 Plugins\ 子目录；JSON 用 Newtonsoft（零依赖）规避 Unsafe 版本冲突（§9.2 / §1） |
 | HttpListener 响应头 WWW-Authenticate | 401 分支抛 ArgumentException → 500 | **已解决（P1）**：WWW-Authenticate 是受限头不能直接赋值，401 只设 StatusCode |
 | 保护字段误判 | 泄露 | 三层防御：Password 硬掩码 + IsProtected + 配置清单；验收标准含明文 grep |
+| `PwGroup.AddEntry` 不更新 `PwEntry.ParentGroup`（2.60） | 条目移动/创建后组归属错误 | **已解决（P2）**：ParentGroup setter 为 internal，`SetParentGroup` 反射调用（`GetProperty("ParentGroup").GetSetMethod(true)`）+ 列表 Add/Remove 显式维护；已加逻辑断言 |
+| Newtonsoft JValue 整数拆箱 `(int?)v.Value` | 传整数参数（limit 等）时 InvalidCastException → internal_error | **已解决（P2）**：`Convert.ToInt32(v.Value)` 并 try/catch（boxed Int64 不能直接强转 int?） |
+| `connection.json` 未随新实例更新 | 客户端拿旧端口 | 〔P3 待查〕：重启后偶发 connection.json 仍为旧端口（启动日志正常），需确认 WriteConnectionFile 失败原因并确保每次启动重写 |
 
 ---
 
@@ -371,5 +374,5 @@ ping                              → {}
 
 1. **P0 验证** ~~（半天内）~~ **已完成 2026-10-01**：MCP SDK 2.2.0 net48 加载 ✓；HttpListener 127.0.0.1 随机端口非管理员绑定 ✓；插件骨架在便携版 2.60.0 加载触发 Initialize ✓；`ProtectedString.IsProtected` 掩码判定 ✓。工程：`src/KeePassMCP`（插件）+ `src/P0Probe.*`（验证探针，保留可复跑）
 2. **P1 只读** ~~进行中~~ **已完成 2026-10-02**：手写 MCP 服务（initialize/ping/tools/list/call、resources/list/read）+ token 鉴权（32B CSPRNG 持久化 %APPDATA%\KeePassMCP\token，恒定时间比较）+ Host 白名单 + 锁定态（请求时 IsOpen 判定）+ list_databases/list_groups/list_entries/get_entry/search_entries + 资源 URI + 掩码序列化器。逻辑探针 42/42（P1Probe.Tools）；KeePass 集成验证全绿（401/403/405/-32601/-32700/initialize 协议协商/tools 5 个/list_databases 信封）。**待用户验证**：真实开库后 list_databases 返回库与条目（探针已用真实 PwDatabase 覆盖，UI 联动未自动化）
-3. **P2 写操作**：dry-run 框架 + rename/move/字段/分组/标签 + create_entry（含密钥写入）+ 审计 + 备份
-4. **P3 密钥访问与打磨**：read_secret + 密钥访问白名单 + UI 弹窗审批 + 多库、配置 UI、restore、并发健壮性、验收清单全绿
+3. **P2 写操作** ~~进行中~~ **已完成 2026-10-02**：dry-run 框架（预览与执行共用变更计算，dry-run 零副作用：不落库/不备份/不审计）+ 写工具（rename_entry、update_entry_fields〔掩码字段→approval_required 整体拒绝，P3 接审批〕、move_entry、create_entry〔fields 含受保护字段免审批 + generate_password 插件内生成，明文不经 Agent 上下文〕、create_group、rename_group、delete_group〔confirm 硬约束 + 预览条目数〕、add_tag、remove_tag、backup_database、get_audit_log）+ 审计 JSONL（写执行记录，args 为安全参数）+ 写前备份快照 + 全局"写需确认"开关（config.json `confirm_writes`）。工具 16 个注册并集成验证；逻辑探针 99/99（42 只读 + 57 写）。发现并修复：AddEntry 不更新 ParentGroup（反射 internal setter）、JValue Int64 拆箱 InvalidCast。**待用户验证**：真实开库后写工具（rename/create 等）在 KeePass UI 可见变化
+4. **P3 密钥访问与打磨**：read_secret + 密钥访问白名单 + UI 弹窗审批 + 多库、配置 UI、restore、并发健壮性、connection.json 重写确认、验收清单全绿

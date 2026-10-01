@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using KeePassLib;
@@ -7,12 +8,15 @@ using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
 using KeePassMCP.Core;
+using Newtonsoft.Json.Linq;
 
 namespace P1Probe.Tools
 {
     /// <summary>
-    /// P1 逻辑探针：用内存 PwDatabase 直测 ToolHandlers（不经宿主/传输），
-    /// 断言掩码不变量（全响应无明文）、分组树、搜索、锁定/未找到错误路径。
+    /// P1/P2 逻辑探针：用内存 PwDatabase 直测 ToolHandlers / WriteHandlers（不经宿主/传输），
+    /// 断言掩码不变量（全响应无明文）、分组树、搜索、锁定/未找到错误路径，
+    /// 以及写操作 dry-run 零副作用、审计/备份无明文、confirm 语义、密钥写入。
+    /// 数据目录经 KeePassMCP_DATA_DIR 隔离到临时目录（不污染真实 %APPDATA%）。
     /// </summary>
     internal static class Program
     {
@@ -23,6 +27,11 @@ namespace P1Probe.Tools
 
         private static void Main()
         {
+            // P2 探针隔离：审计/备份/配置写临时目录
+            string probeDataDir = Path.Combine(Path.GetTempPath(), "kp-probe-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(probeDataDir);
+            Environment.SetEnvironmentVariable("KeePassMCP_DATA_DIR", probeDataDir);
+
             Console.WriteLine("=== P1Probe.Tools：工具处理核心逻辑测试 ===");
             try
             {
@@ -36,6 +45,7 @@ namespace P1Probe.Tools
                 RunSearch(dbs, extra);
                 RunExtraMasked(dbs);
                 RunErrorPaths(dbs);
+                RunP2WriteTests();
             }
             catch (Exception ex)
             {
@@ -216,6 +226,234 @@ namespace P1Probe.Tools
                 !(bool)env["ok"] && ((Dictionary<string, object>)env["error"])["code"].ToString() == "invalid_params");
         }
 
+        // ---------- P2 写操作 ----------
+        private static void RunP2WriteTests()
+        {
+            Console.WriteLine("\n--- P2 写操作 ---");
+            var db = BuildTestDatabase();
+            var dbs = new List<PwDatabase> { db };
+            var extra = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string workUuid = GetGroupUuid(db, "Work");
+            string personalUuid = GetGroupUuid(db, "Personal");
+            string apiUuid = GetEntryUuid(db, "GitHub API");
+
+            int auditBase = FileCount(ConfigPaths.AuditFile);
+            int backupBase = DirectoryCount(ConfigPaths.BackupsDir);
+            bool modifiedBase = db.Modified;
+
+            // ---- 1) rename_entry dry-run：预览 + 零副作用 ----
+            var env = WriteHandlers.RenameEntry(db, apiUuid, "GitHub API v2", false, true);
+            Check("p2 rename dry-run ok", Ok(env));
+            Check("p2 rename dry-run dry_run:true", Json(env).GetProperty("data").GetProperty("dry_run").GetBoolean());
+            Check("p2 rename dry-run 变更 action=rename",
+                Json(env).GetProperty("data").GetProperty("changes")[0].GetProperty("action").GetString() == "rename");
+            Check("p2 rename dry-run 不改标题", GetTitle(db, apiUuid) == "GitHub API");
+            Check("p2 rename dry-run 不置 Modified", db.Modified == modifiedBase);
+            Check("p2 rename dry-run 不写审计", FileCount(ConfigPaths.AuditFile) == auditBase);
+            Check("p2 rename dry-run 不写备份", DirectoryCount(ConfigPaths.BackupsDir) == backupBase);
+
+            // ---- 2) rename_entry 执行 ----
+            env = WriteHandlers.RenameEntry(db, apiUuid, "GitHub API v2", false, false);
+            Check("p2 rename 执行 ok", Ok(env) && Json(env).GetProperty("data").GetProperty("executed").GetBoolean());
+            Check("p2 rename 执行改标题", GetTitle(db, apiUuid) == "GitHub API v2");
+            Check("p2 rename 执行置 Modified", db.Modified);
+            Check("p2 rename 执行审计 +1", FileCount(ConfigPaths.AuditFile) == auditBase + 1);
+            Check("p2 rename 执行备份 +1", DirectoryCount(ConfigPaths.BackupsDir) == backupBase + 1);
+
+            // ---- 3) update_entry_fields ----
+            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+                new Dictionary<string, string> { ["URL"] = "https://github.com/octocat" }, false, false, extra);
+            Check("p2 update URL ok", Ok(env));
+            Check("p2 update URL 生效", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://github.com/octocat");
+
+            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+                new Dictionary<string, string> { ["Password"] = "x" }, false, false, extra);
+            Check("p2 update Password → approval_required",
+                !Ok(env) && ErrCode(env) == "approval_required");
+            Check("p2 update Password 库无变化", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "super-secret-123");
+
+            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+                new Dictionary<string, string>(), false, false, extra);
+            Check("p2 update 空 fields → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+
+            var extraSecret = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Secret" };
+            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+                new Dictionary<string, string> { ["Secret"] = "x" }, false, false, extraSecret);
+            Check("p2 update 附加清单字段 → approval_required", !Ok(env) && ErrCode(env) == "approval_required");
+
+            // ---- 4) move_entry ----
+            env = WriteHandlers.MoveEntry(db, apiUuid, personalUuid, false, false);
+            Check("p2 move ok", Ok(env));
+            Check("p2 move 父组=Personal", FindEntry(db, apiUuid).ParentGroup.Name == "Personal");
+            env = WriteHandlers.MoveEntry(db, apiUuid, personalUuid, false, false);
+            Check("p2 move 同组 → no_op", !Ok(env) && ErrCode(env) == "no_op");
+
+            // ---- 5) create_entry：fields 含受保护字段（免审批） ----
+            env = WriteHandlers.CreateEntry(db, workUuid, "New Site",
+                new Dictionary<string, string> { ["UserName"] = "bob", ["Password"] = "pw-678-901" },
+                null, false, false);
+            Check("p2 create ok", Ok(env) && Json(env).GetProperty("data").GetProperty("executed").GetBoolean());
+            string newUuid = (string)((Dictionary<string, object>)env["data"])["entry_uuid"];
+            var newEntry = FindEntry(db, newUuid);
+            Check("p2 create 条目存在", newEntry != null);
+            Check("p2 create Password 落库", newEntry != null && newEntry.Strings.ReadSafe("Password") == "pw-678-901");
+            Check("p2 create Password 是保护字段", newEntry != null && newEntry.Strings.Get("Password").IsProtected);
+            var getNew = ToolHandlers.GetEntry(dbs, DbId, newUuid, extra);
+            string getNewJson = JsonSerializer.Serialize(getNew);
+            Check("p2 create 读出口无明文", !getNewJson.Contains("pw-678-901"));
+            Check("p2 create 读出口 Password=[protected]",
+                JsonDocument.Parse(getNewJson).RootElement.GetProperty("data").GetProperty("protected_fields")
+                    .GetProperty("Password").GetString() == "[protected]");
+
+            // ---- 6) create_entry：generate_password（明文不经 Agent 上下文） ----
+            env = WriteHandlers.CreateEntry(db, workUuid, "Gen Site", null,
+                JObject.Parse("{\"length\":20,\"charset\":\"alnum\"}"), false, false);
+            Check("p2 gen ok", Ok(env));
+            string genUuid = (string)((Dictionary<string, object>)env["data"])["entry_uuid"];
+            string genPw = FindEntry(db, genUuid).Strings.ReadSafe("Password");
+            Check("p2 gen 长度 20", genPw.Length == 20);
+            Check("p2 gen 只含字母数字", System.Text.RegularExpressions.Regex.IsMatch(genPw, "^[A-Za-z0-9]+$"));
+            var getGen = ToolHandlers.GetEntry(dbs, DbId, genUuid, extra);
+            Check("p2 gen 读出口无明文", !JsonSerializer.Serialize(getGen).Contains(genPw));
+
+            env = WriteHandlers.CreateEntry(db, workUuid, "Bad Gen", null, JObject.Parse("{\"length\":2}"), false, false);
+            Check("p2 gen length 越界 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+
+            // ---- 7) create_group / rename_group ----
+            env = WriteHandlers.CreateGroup(db, workUuid, "Sub", false, false);
+            Check("p2 create_group ok", Ok(env));
+            string subUuid = GetGroupUuid(db, "Sub");
+            Check("p2 create_group 生效", subUuid != null);
+            env = WriteHandlers.RenameGroup(db, subUuid, "Sub2", false, false);
+            Check("p2 rename_group ok", Ok(env) && FindGroupByName(db, "Sub2") != null);
+
+            // ---- 8) delete_group（confirm 硬约束 + 预览条目数） ----
+            env = WriteHandlers.DeleteGroup(db, workUuid, false, false);
+            Check("p2 delete 无 confirm → confirmation_required", !Ok(env) && ErrCode(env) == "confirmation_required");
+            env = WriteHandlers.DeleteGroup(db, workUuid, true, true);
+            Check("p2 delete dry-run ok", Ok(env) && Json(env).GetProperty("data").GetProperty("dry_run").GetBoolean());
+            Check("p2 delete 预览列条目数",
+                Json(env).GetProperty("data").GetProperty("changes")[0].GetProperty("new").GetString().Contains("2 个条目"));
+            Check("p2 delete dry-run 组仍在", GetGroupUuid(db, "Work") != null);
+            env = WriteHandlers.DeleteGroup(db, workUuid, true, false);
+            Check("p2 delete 执行 ok", Ok(env));
+            Check("p2 delete 组消失", GetGroupUuid(db, "Work") == null);
+            env = WriteHandlers.DeleteGroup(db, db.RootGroup.Uuid.ToHexString(), true, false);
+            Check("p2 delete 根组 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+
+            // ---- 9) add_tag / remove_tag ----
+            env = WriteHandlers.AddTag(db, apiUuid, "p2tag", false, false);
+            Check("p2 add_tag ok", Ok(env) && FindEntry(db, apiUuid).Tags.Contains("p2tag"));
+            env = WriteHandlers.AddTag(db, apiUuid, "p2tag", false, false);
+            Check("p2 add_tag 重复 → no_op", !Ok(env) && ErrCode(env) == "no_op");
+            env = WriteHandlers.RemoveTag(db, apiUuid, "p2tag", false, false);
+            Check("p2 remove_tag ok", Ok(env) && !FindEntry(db, apiUuid).Tags.Contains("p2tag"));
+            env = WriteHandlers.RemoveTag(db, apiUuid, "p2tag", false, false);
+            Check("p2 remove_tag 不存在 → no_op", !Ok(env) && ErrCode(env) == "no_op");
+
+            // ---- 10) backup_database ----
+            env = WriteHandlers.BackupDatabase(db);
+            Check("p2 backup ok", Ok(env));
+            using (JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(env)))
+            {
+                var data = doc.RootElement.GetProperty("data");
+                Check("p2 backup entry_count=2（GitHub API + Mailbox）", data.GetProperty("entry_count").GetInt32() == 2);
+                string path = data.GetProperty("path").GetString();
+                Check("p2 backup 文件存在", File.Exists(path));
+                Check("p2 backup 无明文", !File.ReadAllText(path).Contains("super-secret-123")
+                    && !File.ReadAllText(path).Contains("mail-pass-456"));
+            }
+            var emptyDb = BuildEmptyDatabase();
+            env = WriteHandlers.BackupDatabase(emptyDb);
+            Check("p2 backup 空库 → database_empty", !Ok(env) && ErrCode(env) == "database_empty");
+
+            // ---- 11) 全局"写需确认"开关 ----
+            File.WriteAllText(ConfigPaths.ConfigFile, "{\"confirm_writes\":true}");
+            env = WriteHandlers.RenameEntry(db, apiUuid, "X", false, false);
+            Check("p2 开关开启无 confirm → confirmation_required", !Ok(env) && ErrCode(env) == "confirmation_required");
+            env = WriteHandlers.RenameEntry(db, apiUuid, "X", true, false);
+            Check("p2 开关开启带 confirm → ok", Ok(env) && GetTitle(db, apiUuid) == "X");
+            File.WriteAllText(ConfigPaths.ConfigFile, "{\"confirm_writes\":false}");
+
+            // ---- 12) get_audit_log + 审计/备份不变量（全文 grep 无明文） ----
+            var audit = AuditLog.ReadRecent(200, null);
+            Check("p2 audit 非空", audit.Count > 0);
+            Check("p2 audit 首条含 ts/tool",
+                audit[0] is JObject jo && jo["ts"] != null && jo["tool"] != null);
+            string allAudit = File.Exists(ConfigPaths.AuditFile) ? File.ReadAllText(ConfigPaths.AuditFile) : "";
+            Check("p2 审计全文无明文", !allAudit.Contains("super-secret-123") && !allAudit.Contains("pw-678-901")
+                && !allAudit.Contains("mail-pass-456") && !allAudit.Contains("ghp_abc123"));
+            bool backupsClean = true;
+            if (Directory.Exists(ConfigPaths.BackupsDir))
+            {
+                foreach (string f in Directory.GetFiles(ConfigPaths.BackupsDir, "*.json"))
+                {
+                    string content = File.ReadAllText(f);
+                    if (content.Contains("super-secret-123") || content.Contains("pw-678-901")
+                        || content.Contains("mail-pass-456") || content.Contains("ghp_abc123"))
+                        backupsClean = false;
+                }
+            }
+            Check("p2 备份全文无明文", backupsClean);
+        }
+
+        // ---------- P2 helpers ----------
+        private static bool Ok(Dictionary<string, object> env) => (bool)env["ok"];
+
+        private static JsonElement Json(Dictionary<string, object> env) =>
+            JsonDocument.Parse(JsonSerializer.Serialize(env)).RootElement;
+
+        private static string ErrCode(Dictionary<string, object> env) =>
+            ((Dictionary<string, object>)env["error"])["code"].ToString();
+
+        private static int FileCount(string path) => File.Exists(path) ? File.ReadAllLines(path).Length : 0;
+
+        private static int DirectoryCount(string path) =>
+            Directory.Exists(path) ? Directory.GetFiles(path).Length : 0;
+
+        private static PwEntry FindEntry(PwDatabase db, string uuidHex) => FindEntryRec(db.RootGroup, uuidHex);
+
+        private static PwEntry FindEntryRec(PwGroup group, string uuidHex)
+        {
+            foreach (PwEntry e in group.Entries)
+                if (string.Equals(e.Uuid.ToHexString(), uuidHex, StringComparison.OrdinalIgnoreCase)) return e;
+            foreach (PwGroup g in group.Groups)
+            {
+                PwEntry found = FindEntryRec(g, uuidHex);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static string GetTitle(PwDatabase db, string uuidHex)
+        {
+            PwEntry e = FindEntry(db, uuidHex);
+            return e == null ? null : e.Strings.ReadSafe("Title");
+        }
+
+        private static PwGroup FindGroupByName(PwDatabase db, string name) => FindGroupByNameRec(db.RootGroup, name);
+
+        private static PwGroup FindGroupByNameRec(PwGroup group, string name)
+        {
+            if (group.Name == name) return group;
+            foreach (PwGroup g in group.Groups)
+            {
+                PwGroup found = FindGroupByNameRec(g, name);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static PwDatabase BuildEmptyDatabase()
+        {
+            var db = new PwDatabase();
+            var key = new CompositeKey();
+            key.AddUserKey(new KcpPassword("empty-master"));
+            db.New(new IOConnectionInfo { Path = @"C:\test\empty.kdbx" }, key);
+            db.Name = "Empty Probe DB";
+            return db;
+        }
+
         // ---------- 测试库 ----------
         private static PwDatabase BuildTestDatabase()
         {
@@ -257,9 +495,8 @@ namespace P1Probe.Tools
 
         private static string GetGroupUuid(PwDatabase db, string name)
         {
-            foreach (PwGroup g in db.RootGroup.Groups)
-                if (g.Name == name) return g.Uuid.ToHexString();
-            return null;
+            PwGroup g = FindGroupByName(db, name);
+            return g == null ? null : g.Uuid.ToHexString();
         }
 
         private static string GetEntryUuid(PwDatabase db, string title)
