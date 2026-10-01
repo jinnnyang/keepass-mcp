@@ -1,0 +1,15 @@
+# Build artifacts
+bin/
+obj/
+*.user
+
+# Visual Studio
+.vs/
+
+# Local plugin data
+*.plgx
+local/
+
+# OS
+Thumbs.db
+.DS_Store
