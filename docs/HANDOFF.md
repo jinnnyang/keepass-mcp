@@ -255,20 +255,27 @@ ping                              → {}
 - 只读工具不触发审批（`get_entry`/资源仍输出 [protected]）
 
 ### 6.7 库内配置条目（P6 设计 v2，2026-10-02 定稿、未实施）
-**动机**：消除外部 token 文件依赖（token 现存 `%APPDATA%\KeePassMCP\token`，独立于库）；token 随库加密存储、锁库即消失；客户端配置一个用户自管的静态字符串。
-**配置模型（一个条目 = 一个 MCP 服务器）**：
-- 配置条目 = 标题精确 `KeePassMCP.Server`（大小写不敏感、任意分组、不依赖路径）；多服务器 = 标题后缀 `KeePassMCP.Server.<name>`（每个条目一份独立配置）
-- **配置值放条目的 CustomData 键值字典**（KDBX 4 官方插件数据机制：加密同库、不污染用户可见字段列表；官方明确不建议插件数据存字符串字段）：`Token`（鉴权密钥）、`Rules`（结构化规则，语义待定：条目级禁止工具 vs 库级工具白名单，见 §11）
-- **集合型配置 → 标签（KeePass 原生一等公民）**：白名单 = 标签 `KeePassMCP-Whitelist`（免审批）；黑名单 = 标签 `KeePassMCP-Blacklist`（硬拒绝：命中条目拒绝读取/写入，优先级高于白名单）；标签免抄 UUID、KeePass UI 原生右键 Add/Remove Tag、每库独立（跨库隔离）
-- 状态提示：配置条目设专属图标/颜色，防误删误改
+**动机**：消除外部 token 文件依赖；授权/监听/鉴权全部随库走（备份/迁移/多机同步天然一致），判定是纯函数可完整探针化。
+**配置模型（ADR-0003 字段体系，2026-10-03 定稿；取代本段早前"标题前缀 + CustomData + 标签 + secret_whitelist"方案，0002 废止）**：
+- 配置条目 = 字符串字段 `_mcp_config=1` 标记（任意标题、任意分组、多条目并存）；被标记条目整条目掩码 + 备份排除
+- 监听 = `_mcp_server=1` 启用 + `_mcp_listening=127.0.0.1:6789`（`;` 多地址；端口占用自动 +1）；**全部生效配置条目 `_mcp_server=0` → 服务停止且不启动**（评审 H3 修复）
+- 鉴权 = `_mcp_token=xxx;yyy` 并集（任一匹配放行；并集为空 → 无鉴权，仅回环）
+- 作用域 = `_mcp_scope_self=1` 条目不并入全局 token/监听/default 聚合（防共享库配置漂移，评审 M5 增补）
+- 权限 = 六权限（Read/ReadProtected/Write/WriteProtected/Move/List）+ 审计/快照两个全局位；判定优先级：**条目显式字段 → 生效配置条目 default 布尔最严聚合（顺序无关，任一 0 即拒）→ 硬编码默认**（评审 H5 定稿）
+- 配置条目 default 字段：`_mcp_read_default=1` / `_mcp_read_protected_default=0` / `_mcp_write_default=1` / `_mcp_write_protected_default=0` / `_mcp_move_default=1` / `_mcp_list_default=1` / `_mcp_audit_default=0` / `_mcp_backup_default=0`（后两者评审 M3/M6 增补：审计读与整库快照默认拒绝）
+- 普通条目权限字段：`_mcp_read` / `_mcp_read_protected` / `_mcp_write` / `_mcp_write_protected` / `_mcp_move` / `_mcp_list`（`1`=允许 `0`=显式拒绝；`_mcp_list=0` 对客户端隐身）；create/update 拒绝 `_mcp_` 前缀字段（reserved_field，防自授权）
+- 无任何配置条目 → 自动创建 `MCPServerConfiguration`（默认回环 + 随机 32B token + 上表默认；端口占用自动 +1）
+- restore_backup 双闸门（评审 H1/H2 修复）：backupId 白名单正则拒绝路径遍历；恢复循环逐条目 Write 判定，锁定条目标记 restore_skip
+- 状态提示：配置条目设专属图标/颜色，防误删误改（P8）
 - 参考先例：KPEntryTemplates（keepass.info 插件页）——单条目承载配置的生态成熟模式；其 Add Entry tab 反射注入在 KeePass 2.39 曾不兼容，故注入需实测
 **保护规则（铁律延伸）**：
-1. `KeePassMCP.*` 条目禁止 `read_secret`（错误码 `token_entry_protected`）——防 token 明文经审批进 Agent 上下文
-2. 所有读出口（get_entry/list_entries/search_entries/资源）对命中条目**整条目掩码**
-3. `backup_database` 与写前快照**排除**命中条目
-**行为**：库解锁（MainForm.FileOpened 事件）后读取命中条目 CustomData.Token 为 token（覆盖自动生成）；**锁库即服务停止监听**（token 随库锁消失）；多命中取第一个解锁库中条目，其余记警告日志；未找到 → 回退现状自动生成 token（向后兼容，config.json `secret_whitelist` 保留与标签取并集，是否废弃迁移待 P6 定）
-**交互（主路径 = Add Entry tab，KPEntryTemplates 式）**：条目表单注入 "KeePassMCP" tab —— Init As Server（一键生成配置条目并写 CustomData）/ Mark Whitelisted / Mark Blacklisted / 规则编辑
-**技术确认点（实施第一步）**：`PwEntry.CustomData` API 可用性实测；EntryForm 动态注入实测（真实打开 Add Entry 验证 tab 出现）。静态探测已确认（P0Probe.EntryForm）：KeePass 2.60 `KeePass.Forms.PwEntryForm` public、`m_tabMain`(TabControl) 存在、官方事件 `EntrySaving`/`EntrySaved`、MainForm 库生命周期事件 `FileOpened/FileClosed/FileSavingPre` 可用
+1. 配置条目禁止 `read_secret`（错误码 `token_entry_protected`）——防 token 明文经审批进 Agent 上下文
+2. 所有读出口（get_entry/list_entries/search_entries/资源）对配置条目**整条目掩码**；`_mcp_` 前缀字段读出口一律掩码（不依赖 Protected 标志）
+3. `backup_database` 与写前快照**排除**配置条目
+4. `get_audit_log`/`backup_database` 分别要求 `_mcp_audit_default=1`/`_mcp_backup_default=1`（默认拒绝）
+**行为**：库解锁（MainForm.FileOpened 事件）后 EnsureDefaultConfig + 重读 token/监听（RefreshToken）；**锁库即服务停止监听**；多库会话 token/监听跨库并集（scope_self 排除），default 取布尔最严；无 token 集 → 回退自动生成 token（无鉴权态须用户显式清空并集）
+**交互（主路径 = Add Entry tab，KPEntryTemplates 式，P7 待实施）**：条目表单注入 "MCP Server Config" tab（`_mcp_config=1` 条目可见）——可视化编辑 `_mcp_*` 字段（监听/多地址、token 并集、六权限 + 八 default 复选框、scope_self），字段名由插件写入杜绝手敲拼错
+**技术确认点（实施第一步）**：`PwEntry.CustomData` API 可用性实测（P6-1 完成：读写/不可见/持久/读出口全绿，但 P6-3 后配置值改用字符串字段，CustomData 仅作参考）；EntryForm 动态注入实测（真实打开 Add Entry 验证 tab 出现）。静态探测已确认（P0Probe.EntryForm）：KeePass 2.60 `KeePass.Forms.PwEntryForm` public、`m_tabMain`(TabControl) 存在、官方事件 `EntrySaving`/`EntrySaved`、MainForm 库生命周期事件 `FileOpened/FileClosed/FileSavingPre` 可用
 
 ---
 
