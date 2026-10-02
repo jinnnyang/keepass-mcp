@@ -269,6 +269,10 @@ namespace KeePassMCP.MCP
                     return ToolHandlers.SearchEntries(dbs, Str(args, "database_id"), Str(args, "query"),
                         OptStr(args, "scope"), OptInt(args, "limit"), extraMasked);
                 case "get_audit_log":
+                    // ADR-0003 增补（评审 M3）：_mcp_audit_default=1 才允许读审计（默认 0，硬编码拒绝）
+                    if (!LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Audit, dbs))
+                        return ToolHandlers.Err("permission_denied",
+                            "get_audit_log 无权限：需配置条目 _mcp_audit_default=1");
                     return ToolHandlers.Ok(new Dictionary<string, object>
                     {
                         ["entries"] = AuditLog.ReadRecent(OptInt(args, "limit") ?? 50, OptStr(args, "since"))
@@ -319,10 +323,10 @@ namespace KeePassMCP.MCP
                             OptBool(args, "dry_run") ?? false));
                 case "backup_database":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var be, out var bdb) ? be :
-                        WriteHandlers.BackupDatabase(bdb));
+                        WriteHandlers.BackupDatabase(bdb, dbs));
                 case "restore_backup":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var re, out var rdb) ? re :
-                        WriteHandlers.RestoreBackup(rdb, Str(args, "backup_id"),
+                        WriteHandlers.RestoreBackup(rdb, dbs, Str(args, "backup_id"),
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false, extraMasked));
 
                 default:

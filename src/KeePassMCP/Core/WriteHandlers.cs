@@ -28,9 +28,9 @@ namespace KeePassMCP.Core
             new List<PwDatabase> { db };
 
         private static Dictionary<string, object> RequirePermission(PwDatabase db, PwEntry entry,
-            LibraryConfig.MCPPermission perm, string op)
+            LibraryConfig.MCPPermission perm, string op, IEnumerable<PwDatabase> dbs = null)
         {
-            if (!LibraryConfig.ResolvePermission(entry, perm, DbsOf(db)))
+            if (!LibraryConfig.ResolvePermission(entry, perm, dbs ?? DbsOf(db)))
                 return ToolHandlers.Err("permission_denied",
                     $"操作 {op} 无权限：需条目字段 {LibraryConfig.PermissionEntryField(perm)}=1（或配置条目默认允许）");
             return null;
@@ -380,9 +380,11 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["tag"] = tag });
         }
 
-        // ================= backup_database（显式整库快照，读性质） =================
-        public static Dictionary<string, object> BackupDatabase(PwDatabase db)
+        // ================= backup_database（显式整库快照，读性质；_mcp_backup_default 权限，ADR-0003 增补） =================
+        public static Dictionary<string, object> BackupDatabase(PwDatabase db, IEnumerable<PwDatabase> dbs = null)
         {
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Backup, "backup_database", dbs);
+            if (denied != null) return denied;
             string path = BackupStore.SnapshotDatabase(db, "backup_database");
             if (path == null) return ToolHandlers.Err("database_empty", "库为空，无可备份条目");
             int entryCount = CountEntries(db.RootGroup);
@@ -398,14 +400,21 @@ namespace KeePassMCP.Core
             });
         }
 
-        // ================= restore_backup（破坏性，confirm 硬约束 + Write 权限；仅恢复非保护字段） =================
-        public static Dictionary<string, object> RestoreBackup(PwDatabase db, string backupId,
-            bool confirm, bool dryRun, ISet<string> extraMasked)
+        // ================= restore_backup（破坏性，confirm 硬约束 + Write 权限 + backupId 白名单 + 逐条目 Write 闸门；仅恢复非保护字段） =================
+        /// <summary>backupId 白名单（评审 H1）：仅 {17位时间戳}_{工具名}_{8hex}，天然拒绝 `..`/路径分隔符。</summary>
+        private static readonly System.Text.RegularExpressions.Regex BackupIdPattern =
+            new System.Text.RegularExpressions.Regex(@"^\d{17}_[a-zA-Z][a-zA-Z0-9_]*_[0-9a-f]{8}$");
+
+        public static Dictionary<string, object> RestoreBackup(PwDatabase db, IEnumerable<PwDatabase> dbs,
+            string backupId, bool confirm, bool dryRun, ISet<string> extraMasked)
         {
             if (!confirm)
                 return ToolHandlers.Err("confirmation_required", "restore_backup 是破坏性操作，需要 confirm:true");
-            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Write, "restore_backup");
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Write, "restore_backup", dbs);
             if (denied != null) return denied;
+            // H1：backupId 路径遍历防护——拒绝任何非白名单格式（含 ../、\、绝对路径）
+            if (backupId == null || !BackupIdPattern.IsMatch(backupId))
+                return ToolHandlers.Err("invalid_params", "backup_id 格式非法");
             string path = System.IO.Path.Combine(ConfigPaths.BackupsDir, backupId + ".json");
             if (!System.IO.File.Exists(path))
                 return ToolHandlers.Err("backup_not_found", $"备份 {backupId} 不存在");
@@ -417,6 +426,7 @@ namespace KeePassMCP.Core
             var changes = new List<Dictionary<string, object>>();
             var pending = new List<RestoreItem>(); // 执行阶段才写库（dry-run 零副作用）
             int skipped = 0, restored = 0;
+            var permDbs = dbs ?? DbsOf(db);
             foreach (JToken t in entries)
             {
                 var dto = t as JObject;
@@ -433,6 +443,18 @@ namespace KeePassMCP.Core
                         ["action"] = "restore_skip",
                         ["target"] = new Dictionary<string, object> { ["uuid"] = uuid, ["title"] = title },
                         ["new"] = "备份条目当前不存在，跳过"
+                    });
+                    skipped++;
+                    continue;
+                }
+                // H2：逐条目 Write 闸门——显式 _mcp_write=0（或 default 拒绝）的条目不回写
+                if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Write, permDbs))
+                {
+                    changes.Add(new Dictionary<string, object>
+                    {
+                        ["action"] = "restore_skip",
+                        ["target"] = Target(entry),
+                        ["new"] = "条目被写权限锁定（_mcp_write=0 或默认拒绝），跳过"
                     });
                     skipped++;
                     continue;

@@ -26,13 +26,15 @@ namespace KeePassMCP.Core
         public const string ListeningField = "_mcp_listening";     // 127.0.0.1:6789;0.0.0.0:8080
         public const string TokenField = "_mcp_token";             // xxx;yyy 鉴权并集（空 → 无鉴权）
 
-        // 配置条目 default 权限字段（全局兜底）
+        // 配置条目 default 权限字段（全局兜底；多配置条目聚合取布尔最严，顺序无关）
         public const string ReadDefault = "_mcp_read_default";
         public const string ReadProtectedDefault = "_mcp_read_protected_default";
         public const string WriteDefault = "_mcp_write_default";
         public const string WriteProtectedDefault = "_mcp_write_protected_default";
         public const string MoveDefault = "_mcp_move_default";
         public const string ListDefault = "_mcp_list_default";
+        public const string AuditDefault = "_mcp_audit_default";       // =1 才允许客户端读 get_audit_log（默认 0，ADR-0003 增补 M3）
+        public const string BackupDefault = "_mcp_backup_default";     // =1 才允许触发 backup_database（默认 0，ADR-0003 增补 M6）
 
         // 条目显式权限字段
         public const string ReadField = "_mcp_read";
@@ -41,6 +43,9 @@ namespace KeePassMCP.Core
         public const string WriteProtectedField = "_mcp_write_protected";
         public const string MoveField = "_mcp_move";
         public const string ListField = "_mcp_list";
+
+        // 配置条目作用域（ADR-0003 增补 M5）
+        public const string ScopeSelfField = "_mcp_scope_self";        // =1 该配置条目不并入全局 token/监听/default 聚合
 
         public const string DefaultConfigTitle = "MCPServerConfiguration";
         public const string DefaultListening = "127.0.0.1:6789";
@@ -55,6 +60,27 @@ namespace KeePassMCP.Core
 
         /// <summary>监听开关：_mcp_server 字段值为真。</summary>
         public static bool IsServerEnabled(PwEntry entry) => FieldFlag(entry, ServerFlag);
+
+        /// <summary>作用域自限：_mcp_scope_self=1 的配置条目不并入全局集（token/监听/default 聚合排除）。</summary>
+        public static bool IsScopeSelf(PwEntry entry) => FieldFlag(entry, ScopeSelfField);
+
+        /// <summary>生效配置条目集：全部配置条目中 scope_self=1 的排除（全局集口径）。
+        /// FindConfigEntries 保持全量（掩码/备份排除判定不受作用域影响）。</summary>
+        public static List<PwEntry> EffectiveConfigEntries(IEnumerable<PwDatabase> dbs)
+        {
+            return FindConfigEntries(dbs).Where(e => !IsScopeSelf(e)).ToList();
+        }
+
+        /// <summary>服务启停判定（ADR-0003 语义定稿：_mcp_server=0 真正停监听）：生效配置条目中任一 _mcp_server 为真 → 启动；
+        /// 全部为假 → 停止；无配置条目 → 默认启动（与 EnsureDefaultConfig 自动创建一致）。</summary>
+        public static bool ResolveServerEnabled(IEnumerable<PwDatabase> dbs)
+        {
+            var eff = EffectiveConfigEntries(dbs);
+            if (eff.Count == 0) return true;
+            foreach (PwEntry e in eff)
+                if (IsServerEnabled(e)) return true;
+            return false;
+        }
 
         private static bool FieldFlag(PwEntry entry, string field)
         {
@@ -106,22 +132,16 @@ namespace KeePassMCP.Core
                 CollectConfigEntries(g, sink);
         }
 
-        /// <summary>首个配置条目（default 权限字段取此条目的值；多配置条目时 default 取第一个，token/监听为并集）。</summary>
-        public static PwEntry FindFirstConfigEntry(IEnumerable<PwDatabase> dbs)
-        {
-            var all = FindConfigEntries(dbs);
-            return all.Count > 0 ? all[0] : null;
-        }
-
+        /// <summary>库内是否存在配置条目（全量口径，含 scope_self=1——显式创建过配置即不自动重建默认）。</summary>
         public static bool HasAnyConfigEntry(IEnumerable<PwDatabase> dbs) =>
-            FindFirstConfigEntry(dbs) != null;
+            FindConfigEntries(dbs).Count > 0;
 
         // ---------- 鉴权：token 并集 ----------
-        /// <summary>全部配置条目 _mcp_token 并集（`;` 拆分、去空、去重）。空列表 = 无鉴权态。</summary>
+        /// <summary>生效配置条目 _mcp_token 并集（`;` 拆分、去空、去重；scope_self=1 排除）。空列表 = 无鉴权态。</summary>
         public static List<string> CollectTokens(IEnumerable<PwDatabase> dbs)
         {
             var set = new List<string>();
-            foreach (PwEntry e in FindConfigEntries(dbs))
+            foreach (PwEntry e in EffectiveConfigEntries(dbs))
             {
                 string v = ReadMcpField(e, TokenField);
                 if (string.IsNullOrWhiteSpace(v)) continue;
@@ -134,11 +154,11 @@ namespace KeePassMCP.Core
             return set;
         }
 
-        /// <summary>监听地址并集（`;` 拆分）；无配置条目/无字段 → 默认 127.0.0.1:6789。</summary>
+        /// <summary>生效配置条目监听地址并集（`;` 拆分）；无生效条目/无字段 → 默认 127.0.0.1:6789。</summary>
         public static List<string> CollectListeningSpecs(IEnumerable<PwDatabase> dbs)
         {
             var list = new List<string>();
-            foreach (PwEntry e in FindConfigEntries(dbs))
+            foreach (PwEntry e in EffectiveConfigEntries(dbs))
             {
                 string v = ReadMcpField(e, ListeningField);
                 if (string.IsNullOrWhiteSpace(v)) continue;
@@ -151,9 +171,10 @@ namespace KeePassMCP.Core
             return list.Count > 0 ? list : new List<string> { DefaultListening };
         }
 
-        // ---------- 权限解析（ADR-0003：条目字段 → default → 硬编码） ----------
-        public enum MCPPermission { Read, ReadProtected, Write, WriteProtected, Move, List }
+        // ---------- 权限解析（ADR-0003：条目字段 → default 最严聚合 → 硬编码） ----------
+        public enum MCPPermission { Read, ReadProtected, Write, WriteProtected, Move, List, Audit, Backup }
 
+        /// <summary>条目级权限字段（Audit/Backup 仅 default 链，无条目级字段）。</summary>
         public static string PermissionEntryField(MCPPermission p) => p switch
         {
             MCPPermission.Read => ReadField,
@@ -161,7 +182,8 @@ namespace KeePassMCP.Core
             MCPPermission.Write => WriteField,
             MCPPermission.WriteProtected => WriteProtectedField,
             MCPPermission.Move => MoveField,
-            _ => ListField
+            MCPPermission.List => ListField,
+            _ => null
         };
 
         public static string PermissionDefaultField(MCPPermission p) => p switch
@@ -171,10 +193,12 @@ namespace KeePassMCP.Core
             MCPPermission.Write => WriteDefault,
             MCPPermission.WriteProtected => WriteProtectedDefault,
             MCPPermission.Move => MoveDefault,
-            _ => ListDefault
+            MCPPermission.List => ListDefault,
+            MCPPermission.Audit => AuditDefault,
+            _ => BackupDefault
         };
 
-        /// <summary>硬编码默认（ADR-0003：仅 move/read/write 未保护允许；保护字段一律拒绝）。</summary>
+        /// <summary>硬编码默认（ADR-0003：仅 move/read/write 未保护允许；保护字段与审计/快照一律拒绝）。</summary>
         public static bool HardDefault(MCPPermission p) => p switch
         {
             MCPPermission.Read => true,
@@ -184,22 +208,29 @@ namespace KeePassMCP.Core
             _ => false
         };
 
-        /// <summary>解析条目在某操作上的权限：条目显式字段 → 首个配置条目 default → 硬编码默认。</summary>
+        /// <summary>解析条目在某操作上的权限：条目显式字段 → 生效配置条目 default 布尔最严聚合 → 硬编码默认。
+        /// 聚合规则（ADR-0003 语义定稿）：任一配置条目显式值=0 → 拒绝；全部显式值=1 → 允许；
+        /// 全部缺失 → 硬编码。顺序无关（scope_self=1 条目不参与）。Audit/Backup 无条目字段，entry 传 null。</summary>
         public static bool ResolvePermission(PwEntry entry, MCPPermission perm, IEnumerable<PwDatabase> dbs)
         {
-            // 1) 条目显式字段
-            if (entry != null)
+            // 1) 条目显式字段（仅六项权限有条目级字段）
+            string entryField = PermissionEntryField(perm);
+            if (entry != null && entryField != null)
             {
-                string v = ReadMcpField(entry, PermissionEntryField(perm));
+                string v = ReadMcpField(entry, entryField);
                 if (v != null) return IsFlagTrue(v);
             }
-            // 2) 配置条目 default（第一个配置条目）
-            PwEntry cfg = FindFirstConfigEntry(dbs);
-            if (cfg != null)
+            // 2) 生效配置条目 default 聚合（布尔最严 = AND，顺序无关）
+            bool anyExplicit = false;
+            bool result = true;
+            foreach (PwEntry cfg in EffectiveConfigEntries(dbs))
             {
                 string dv = ReadMcpField(cfg, PermissionDefaultField(perm));
-                if (dv != null) return IsFlagTrue(dv);
+                if (dv == null) continue;
+                anyExplicit = true;
+                result = result && IsFlagTrue(dv);
             }
+            if (anyExplicit) return result;
             // 3) 硬编码默认
             return HardDefault(perm);
         }
@@ -232,6 +263,9 @@ namespace KeePassMCP.Core
                 entry.Strings.Set(WriteProtectedDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(MoveDefault, new ProtectedString(false, "1"));
                 entry.Strings.Set(ListDefault, new ProtectedString(false, "1"));
+                entry.Strings.Set(AuditDefault, new ProtectedString(false, "0"));
+                entry.Strings.Set(BackupDefault, new ProtectedString(false, "0"));
+                entry.Strings.Set(ScopeSelfField, new ProtectedString(false, "0"));
                 db.RootGroup.AddEntry(entry, true); // 必须显式 AddEntry（P2 教训）
                 db.Modified = true;
                 Log.Write($"自动创建默认 MCP 配置条目 {DefaultConfigTitle}（{SafeDbName(db)}），监听 {DefaultListening}，随机 token");

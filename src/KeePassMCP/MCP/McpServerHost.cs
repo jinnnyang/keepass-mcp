@@ -83,9 +83,24 @@ namespace KeePassMCP.MCP
             }
         }
 
-        /// <summary>刷新 token/监听（库事件触发：FileOpened/FileSaved 后重读）；变化时重启监听或重写 connection.json。</summary>
+        /// <summary>刷新 token/监听（库事件触发：FileOpened/FileSaved 后重读）；变化时重启监听或重写 connection.json。
+        /// H3（ADR-0003 语义定稿）：全部生效配置条目 _mcp_server=0 → 停止且不启动。</summary>
         public void RefreshToken()
         {
+            try
+            {
+                if (!LibraryConfig.ResolveServerEnabled(_facade.GetDatabases()))
+                {
+                    if (_running)
+                    {
+                        Stop();
+                        Log.Write("MCP 配置条目全部 _mcp_server=0，服务已停止");
+                    }
+                    return;
+                }
+            }
+            catch (Exception ex) { Log.Write("ResolveServerEnabled failed: " + ex.Message); }
+
             var nextTokens = ResolveTokens();
             var nextSpecs = ResolveListeningSpecs();
             bool changed = !SameList(nextTokens, _activeTokens) || !SameList(nextSpecs, _listeningSpecs);
@@ -126,6 +141,18 @@ namespace KeePassMCP.MCP
             // ADR-0003 Q2：库内无任何配置条目 → 自动创建 MCPServerConfiguration（默认回环+随机 token+默认权限）
             try { LibraryConfig.EnsureDefaultConfig(_facade.GetDatabases()); }
             catch (Exception ex) { Log.Write("EnsureDefaultConfig failed: " + ex); }
+
+            // H3：全部生效配置条目 _mcp_server=0 → 不监听（字段名存实亡修复）
+            try
+            {
+                if (!LibraryConfig.ResolveServerEnabled(_facade.GetDatabases()))
+                {
+                    Log.Write("MCP 配置条目全部 _mcp_server=0，监听不启动");
+                    Stop();
+                    return;
+                }
+            }
+            catch (Exception ex) { Log.Write("ResolveServerEnabled failed: " + ex.Message); }
 
             _listeningSpecs = ResolveListeningSpecs();
             _activeTokens = ResolveTokens();

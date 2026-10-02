@@ -373,9 +373,16 @@ namespace P1Probe.Tools
             env = WriteHandlers.RemoveTag(db, apiUuid, "p2tag", false);
             Check("p2 remove_tag 不存在 → no_op", !Ok(env) && ErrCode(env) == "no_op");
 
-            // ---- 10) backup_database ----
+            // ---- 10) backup_database（ADR-0003 增补：_mcp_backup_default=1 才允许；无配置库默认拒绝） ----
             env = WriteHandlers.BackupDatabase(db);
-            Check("p2 backup ok", Ok(env));
+            Check("p2 backup 无配置库默认拒绝 → permission_denied", !Ok(env) && ErrCode(env) == "permission_denied");
+            var cfgBk = new PwEntry(db.RootGroup, true, true);
+            cfgBk.Strings.Set("Title", new ProtectedString(false, "BK"));
+            cfgBk.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            cfgBk.Strings.Set("_mcp_backup_default", new ProtectedString(false, "1"));
+            db.RootGroup.AddEntry(cfgBk, true);
+            env = WriteHandlers.BackupDatabase(db);
+            Check("p2 backup 授权后 ok", Ok(env));
             using (JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(env)))
             {
                 var data = doc.RootElement.GetProperty("data");
@@ -386,6 +393,11 @@ namespace P1Probe.Tools
                     && !File.ReadAllText(path).Contains("mail-pass-456"));
             }
             var emptyDb = BuildEmptyDatabase();
+            var cfgBkE = new PwEntry(emptyDb.RootGroup, true, true);
+            cfgBkE.Strings.Set("Title", new ProtectedString(false, "BK"));
+            cfgBkE.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            cfgBkE.Strings.Set("_mcp_backup_default", new ProtectedString(false, "1"));
+            emptyDb.RootGroup.AddEntry(cfgBkE, true);
             env = WriteHandlers.BackupDatabase(emptyDb);
             Check("p2 backup 空库 → database_empty", !Ok(env) && ErrCode(env) == "database_empty");
 
@@ -504,6 +516,12 @@ namespace P1Probe.Tools
             Check("p5 update dry-run 库无变化", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == pwBeforeDry);
 
             // ---- 6) restore_backup ----
+            // ADR-0003 增补：backup/restore 需 _mcp_backup_default=1（无配置库默认拒绝）→ 临时配置条目授权
+            var cfgBk3 = new PwEntry(db.RootGroup, true, true);
+            cfgBk3.Strings.Set("Title", new ProtectedString(false, "BK3"));
+            cfgBk3.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            cfgBk3.Strings.Set("_mcp_backup_default", new ProtectedString(false, "1"));
+            db.RootGroup.AddEntry(cfgBk3, true);
             env = WriteHandlers.BackupDatabase(db);
             Check("p3 backup ok", Ok(env));
             string backupId = (string)((Dictionary<string, object>)env["data"])["backup_id"];
@@ -515,20 +533,21 @@ namespace P1Probe.Tools
             Check("p3 restore 前置：URL 已改", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://changed.example");
             Check("p3 restore 前置：Password 已改", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "post-backup-pw");
 
-            env = WriteHandlers.RestoreBackup(db, backupId, false, false, extra);
+            env = WriteHandlers.RestoreBackup(db, dbs, backupId, false, false, extra);
             Check("p3 restore 无 confirm → confirmation_required", !Ok(env) && ErrCode(env) == "confirmation_required");
 
-            env = WriteHandlers.RestoreBackup(db, backupId, true, true, extra);
+            env = WriteHandlers.RestoreBackup(db, dbs, backupId, true, true, extra);
             Check("p3 restore dry-run ok", Ok(env) && Json(env).GetProperty("data").GetProperty("dry_run").GetBoolean());
             Check("p3 restore dry-run 不改库", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://changed.example");
 
-            env = WriteHandlers.RestoreBackup(db, backupId, true, false, extra);
+            env = WriteHandlers.RestoreBackup(db, dbs, backupId, true, false, extra);
             Check("p3 restore 执行 ok", Ok(env) && Json(env).GetProperty("data").GetProperty("executed").GetBoolean());
             Check("p3 restore URL 恢复非保护字段", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://github.com");
             Check("p3 restore Password 保护字段不触碰", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "post-backup-pw");
             Check("p3 restore 置 Modified", db.Modified);
 
-            env = WriteHandlers.RestoreBackup(db, "no-such-backup", true, false, extra);
+            // 合法格式但不存在 → backup_not_found（H1 白名单后：非法格式走 invalid_params，合法不存在的走 not_found）
+            env = WriteHandlers.RestoreBackup(db, dbs, "20261003000000000_restore_backup_deadbeef", true, false, extra);
             Check("p3 restore 备份不存在 → backup_not_found", !Ok(env) && ErrCode(env) == "backup_not_found");
 
             // ---- 7) P3 全局不变量：审计/备份全文无明文（含授权后写入的密码） ----
@@ -618,6 +637,7 @@ namespace P1Probe.Tools
             string mailUuid = GetEntryUuid(db, "Mailbox");
             string cfgUuid = GetEntryUuid(db, "My Server Config");
             string cfg2Uuid = GetEntryUuid(db, "Second Config");
+            string cfg3Uuid = GetEntryUuid(db, "Scoped Config");
             var dbs = new List<PwDatabase> { db };
 
             // ---- 1) 识别 ----
@@ -627,22 +647,23 @@ namespace P1Probe.Tools
             Check("p6 IsConfigEntry 普通条目 false", !LibraryConfig.IsConfigEntry(FindEntry(db, apiUuid)));
             Check("p6 IsServerEnabled 配置条目 true", LibraryConfig.IsServerEnabled(FindEntry(db, cfgUuid)));
 
-            // ---- 2) 发现（多配置条目） ----
+            // ---- 2) 发现（多配置条目；全量 3 个，scope_self 不影响发现） ----
             var cfgs = LibraryConfig.FindConfigEntries(dbs);
-            Check("p6 FindConfigEntries 2 个", cfgs.Count == 2);
-            Check("p6 FindFirstConfigEntry 首个", LibraryConfig.FindFirstConfigEntry(dbs) == FindEntry(db, cfgUuid));
+            Check("p6 FindConfigEntries 3 个", cfgs.Count == 3);
             Check("p6 HasAnyConfigEntry true", LibraryConfig.HasAnyConfigEntry(dbs));
             Check("p6 空库无配置", !LibraryConfig.HasAnyConfigEntry(new List<PwDatabase> { BuildEmptyDatabase() }));
 
-            // ---- 3) token 并集 + 监听并集 ----
+            // ---- 3) token 并集 + 监听并集（scope_self=1 条目排除） ----
             var tokens = LibraryConfig.CollectTokens(dbs);
             Check("p6 CollectTokens 并集 3 个（去重）",
                 tokens.Count == 3 && tokens.Contains("lib-token-xyz") && tokens.Contains("lib-token-abc")
                 && tokens.Contains("second-token"));
+            Check("p6 CollectTokens 排除 scope_self 条目", !tokens.Contains("scoped-token-1"));
             var specs = LibraryConfig.CollectListeningSpecs(dbs);
             Check("p6 CollectListeningSpecs 并集",
                 specs.Count == 3 && specs.Contains("127.0.0.1:7000") && specs.Contains("0.0.0.0:7001")
                 && specs.Contains("127.0.0.1:7002"));
+            Check("p6 CollectListeningSpecs 排除 scope_self 条目", !specs.Contains("127.0.0.1:7777"));
             var specsDefault = LibraryConfig.CollectListeningSpecs(new List<PwDatabase> { BuildTestDatabase() });
             Check("p6 无配置 → 默认监听 127.0.0.1:6789",
                 specsDefault.Count == 1 && specsDefault[0] == LibraryConfig.DefaultListening);
@@ -651,14 +672,19 @@ namespace P1Probe.Tools
             // 4.1 条目显式字段优先：GitHub API _mcp_read_protected=1 → true
             Check("p6 权限 条目显式 ReadProtected=true",
                 LibraryConfig.ResolvePermission(FindEntry(db, apiUuid), LibraryConfig.MCPPermission.ReadProtected, dbs));
-            // 4.2 无显式 → default：Mailbox read=true(read_default=1)、read_protected=false(read_protected_default=0)
-            Check("p6 权限 default Read=true",
+            // 4.2 default 最严聚合（ADR-0003 语义定稿）：cfg1 write_default=1 ∧ cfg2 write_default=0 → Write=false；顺序无关
+            Check("p6 default 最严聚合 Write=false（cfg2=0）",
+                !LibraryConfig.ResolvePermission(FindEntry(db, mailUuid), LibraryConfig.MCPPermission.Write, dbs));
+            Check("p6 default 聚合 Read=true（仅 cfg1 显式=1）",
                 LibraryConfig.ResolvePermission(FindEntry(db, mailUuid), LibraryConfig.MCPPermission.Read, dbs));
-            Check("p6 权限 default ReadProtected=false",
+            Check("p6 default 聚合 ReadProtected=false",
                 !LibraryConfig.ResolvePermission(FindEntry(db, mailUuid), LibraryConfig.MCPPermission.ReadProtected, dbs));
-            Check("p6 权限 default WriteProtected=false",
+            Check("p6 default 聚合 WriteProtected=false",
                 !LibraryConfig.ResolvePermission(FindEntry(db, mailUuid), LibraryConfig.MCPPermission.WriteProtected, dbs));
-            // 4.3 硬编码兜底：无配置条目库 → Read/Write/Move/List true，保护字段 false
+            // 4.3 scope_self 条目不参与 default 聚合（cfg3 read_default=0 被排除 → Read 仍 true）
+            Check("p6 scope_self 不参与 default 聚合",
+                LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Read, dbs));
+            // 4.4 硬编码兜底：无配置条目库 → Read/Write/Move/List true，保护/审计/快照 false
             var plainDb = BuildTestDatabase();
             var plainDbs = new List<PwDatabase> { plainDb };
             Check("p6 硬编码 Read=true",
@@ -673,9 +699,31 @@ namespace P1Probe.Tools
                 LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Move, plainDbs));
             Check("p6 硬编码 List=true",
                 LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.List, plainDbs));
-            // 4.4 显式 0 覆盖 default：Mailbox _mcp_list=0 → false
+            Check("p6 硬编码 Audit=false",
+                !LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Audit, plainDbs));
+            Check("p6 硬编码 Backup=false",
+                !LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Backup, plainDbs));
+            // 4.5 显式 0 覆盖 default：Mailbox _mcp_list=0 → false
             Check("p6 权限 显式0覆盖 default List=false",
                 !LibraryConfig.ResolvePermission(FindEntry(db, mailUuid), LibraryConfig.MCPPermission.List, dbs));
+            // 4.6 Audit/Backup 权限位（ADR-0003 增补）：cfg1 =1 → true
+            Check("p6 Audit 权限位 cfg1=1 → true",
+                LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Audit, dbs));
+            Check("p6 Backup 权限位 cfg1=1 → true",
+                LibraryConfig.ResolvePermission(null, LibraryConfig.MCPPermission.Backup, dbs));
+
+            // ---- 4.7 服务启停判定（H3：全部 _mcp_server=0 → 停；任一真 → 启；无配置 → 默认启） ----
+            Check("p6 ResolveServerEnabled 任一真 → true", LibraryConfig.ResolveServerEnabled(dbs));
+            Check("p6 ResolveServerEnabled 无配置 → true",
+                LibraryConfig.ResolveServerEnabled(new List<PwDatabase> { BuildTestDatabase() }));
+            var offDb = BuildTestDatabase();
+            var offCfg = new PwEntry(offDb.RootGroup, true, true);
+            offCfg.Strings.Set("Title", new ProtectedString(false, "Off"));
+            offCfg.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            offCfg.Strings.Set("_mcp_server", new ProtectedString(false, "0"));
+            offDb.RootGroup.AddEntry(offCfg, true);
+            Check("p6 ResolveServerEnabled 全 0 → false",
+                !LibraryConfig.ResolveServerEnabled(new List<PwDatabase> { offDb }));
 
             // ---- 5) 保护规则①：read_secret 配置条目 → token_entry_protected ----
             var env = SecretHandlers.ReadSecret(db, cfgUuid, null);
@@ -702,7 +750,8 @@ namespace P1Probe.Tools
             string backupPath = BackupStore.SnapshotDatabase(db, "p6_backup");
             string backupText = File.ReadAllText(backupPath);
             Check("p6 备份文件存在", File.Exists(backupPath));
-            Check("p6 备份不含配置条目 uuid", !backupText.Contains(cfgUuid) && !backupText.Contains(cfg2Uuid));
+            Check("p6 备份不含配置条目 uuid",
+                !backupText.Contains(cfgUuid) && !backupText.Contains(cfg2Uuid) && !backupText.Contains(cfg3Uuid));
             Check("p6 备份含普通条目 uuid", backupText.Contains(apiUuid) || backupText.Contains(mailUuid));
             Check("p6 备份无 token 明文", !backupText.Contains("lib-token-xyz") && !backupText.Contains("second-token"));
 
@@ -735,7 +784,10 @@ namespace P1Probe.Tools
                 && LibraryConfig.ReadMcpField(created, LibraryConfig.WriteDefault) == "1"
                 && LibraryConfig.ReadMcpField(created, LibraryConfig.WriteProtectedDefault) == "0"
                 && LibraryConfig.ReadMcpField(created, LibraryConfig.MoveDefault) == "1"
-                && LibraryConfig.ReadMcpField(created, LibraryConfig.ListDefault) == "1");
+                && LibraryConfig.ReadMcpField(created, LibraryConfig.ListDefault) == "1"
+                && LibraryConfig.ReadMcpField(created, LibraryConfig.AuditDefault) == "0"
+                && LibraryConfig.ReadMcpField(created, LibraryConfig.BackupDefault) == "0"
+                && LibraryConfig.ReadMcpField(created, LibraryConfig.ScopeSelfField) == "0");
             Check("p6 自动创建置 Modified", emptyDb.Modified);
             Check("p6 有配置不重复创建", LibraryConfig.EnsureDefaultConfig(dbs) == null);
             Check("p6 GenerateRandomToken 长度 64", LibraryConfig.GenerateRandomToken().Length == 64);
@@ -749,6 +801,47 @@ namespace P1Probe.Tools
             // get_entry 隐身 → entry_not_found
             var hiddenGet = ToolHandlers.GetEntry(dbs, DbId, mailUuid, extra);
             Check("p6 get_entry 隐身 → entry_not_found", !Ok(hiddenGet) && ErrCode(hiddenGet) == "entry_not_found");
+
+            // ---- 11) 评审修复回归：H1 路径遍历 / H2 逐条目 Write / backup 权限工具级 ----
+            // 独立库（P6 库 cfg2 write_default=0 会把 Write 聚合为拒绝，故 H1/H2 用不收紧 Write 的环境）
+            var hDb = BuildTestDatabase();
+            var hDbs = new List<PwDatabase> { hDb };
+            var hCfg = new PwEntry(hDb.RootGroup, true, true);
+            hCfg.Strings.Set("Title", new ProtectedString(false, "HK"));
+            hCfg.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            hCfg.Strings.Set("_mcp_backup_default", new ProtectedString(false, "1"));
+            hDb.RootGroup.AddEntry(hCfg, true);
+            string hMailUuid = GetEntryUuid(hDb, "Mailbox");
+
+            // H1：backupId 白名单——../ 与任意路径被拒（invalid_params），不触碰文件系统
+            env = WriteHandlers.RestoreBackup(hDb, hDbs, "../../etc/passwd", true, false, extra);
+            Check("p6 restore 路径遍历 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+            env = WriteHandlers.RestoreBackup(hDb, hDbs, "..\\..\\windows\\system.ini", true, false, extra);
+            Check("p6 restore 反斜杠路径 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+            env = WriteHandlers.RestoreBackup(hDb, hDbs, "not-a-backup-id", true, false, extra);
+            Check("p6 restore 非白名单格式 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+
+            // H2：显式 _mcp_write=0 的条目 restore 时逐条目跳过（不被批量回写）
+            env = WriteHandlers.BackupDatabase(hDb, hDbs);
+            Check("p6 H2 前置 backup ok", Ok(env));
+            string h2BackupId = (string)((Dictionary<string, object>)env["data"])["backup_id"];
+            env = WriteHandlers.UpdateEntryFields(hDb, hMailUuid,
+                new Dictionary<string, string> { ["URL"] = "https://locked.example" }, false, extra);
+            Check("p6 H2 前置 URL 已改", Ok(env) && FindEntry(hDb, hMailUuid).Strings.ReadSafe("URL") == "https://locked.example");
+            FindEntry(hDb, hMailUuid).Strings.Set("_mcp_write", new ProtectedString(false, "0"));
+            env = WriteHandlers.RestoreBackup(hDb, hDbs, h2BackupId, true, false, extra);
+            Check("p6 H2 restore ok", Ok(env));
+            string h2Json = JsonSerializer.Serialize(env);
+            Check("p6 H2 changes 含写锁定 skip", h2Json.Contains("restore_skip"));
+            Check("p6 H2 锁定条目未被回写", FindEntry(hDb, hMailUuid).Strings.ReadSafe("URL") == "https://locked.example");
+            // 对照：解除锁定后恢复（备份时 Mailbox URL 为空串）
+            FindEntry(hDb, hMailUuid).Strings.Remove("_mcp_write");
+            env = WriteHandlers.RestoreBackup(hDb, hDbs, h2BackupId, true, false, extra);
+            Check("p6 H2 解除锁定后恢复（URL 回备份值空串）", Ok(env)
+                && FindEntry(hDb, hMailUuid).Strings.ReadSafe("URL") == "");
+            // 工具级 Backup 权限拒绝：无配置库默认拒绝（评审 M6）
+            env = WriteHandlers.BackupDatabase(plainDb, plainDbs);
+            Check("p6 backup 无配置库权限拒绝 → permission_denied", !Ok(env) && ErrCode(env) == "permission_denied");
         }
 
         // ---------- P2 helpers ----------
@@ -872,15 +965,28 @@ namespace P1Probe.Tools
             cfg.Strings.Set("_mcp_write_protected_default", new ProtectedString(false, "0"));
             cfg.Strings.Set("_mcp_move_default", new ProtectedString(false, "1"));
             cfg.Strings.Set("_mcp_list_default", new ProtectedString(false, "1"));
+            cfg.Strings.Set("_mcp_audit_default", new ProtectedString(false, "1"));      // ADR-0003 增补：审计读放行
+            cfg.Strings.Set("_mcp_backup_default", new ProtectedString(false, "1"));    // ADR-0003 增补：快照放行
             db.RootGroup.AddEntry(cfg, true); // 必须显式 AddEntry（P2 教训）
 
-            // 配置条目 2：第二个配置（token/监听并入集）
+            // 配置条目 2：第二个配置（token/监听并入集；write_default=0 → 最严聚合测试）
             var cfg2 = new PwEntry(db.RootGroup, true, true);
             cfg2.Strings.Set("Title", new ProtectedString(false, "Second Config"));
             cfg2.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
             cfg2.Strings.Set("_mcp_listening", new ProtectedString(false, "127.0.0.1:7002"));
             cfg2.Strings.Set("_mcp_token", new ProtectedString(true, "second-token"));
+            cfg2.Strings.Set("_mcp_write_default", new ProtectedString(false, "0"));
             db.RootGroup.AddEntry(cfg2, true);
+
+            // 配置条目 3：scope_self=1（ADR-0003 增补：不并入全局 token/监听/default 聚合）
+            var cfg3 = new PwEntry(db.RootGroup, true, true);
+            cfg3.Strings.Set("Title", new ProtectedString(false, "Scoped Config"));
+            cfg3.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
+            cfg3.Strings.Set("_mcp_scope_self", new ProtectedString(false, "1"));
+            cfg3.Strings.Set("_mcp_listening", new ProtectedString(false, "127.0.0.1:7777"));
+            cfg3.Strings.Set("_mcp_token", new ProtectedString(true, "scoped-token-1"));
+            cfg3.Strings.Set("_mcp_read_default", new ProtectedString(false, "0"));
+            db.RootGroup.AddEntry(cfg3, true);
 
             // 普通条目显式权限：GitHub API 授权读保护；Mailbox 隐身（_mcp_list=0，显式覆盖 default）
             FindEntry(db, GetEntryUuid(db, "GitHub API"))
