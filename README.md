@@ -83,6 +83,43 @@ flowchart LR
 
 标准 MCP 客户端（moirai 等）按 `mcp_client` 段配置即可（Streamable HTTP + Bearer token，仅 127.0.0.1 回环）。
 
+### agent 端接入示例（如何声明这个 MCP server）
+
+**hermes-agent / moirai**（`~/.hermes/config.yaml`，改后执行 `/reload-mcp` 重载）：
+
+```yaml
+mcp_servers:
+  keepassmcp:
+    url: "http://127.0.0.1:53029/mcp"
+    headers:
+      Authorization: "Bearer ${env:KEEPASSMCP_TOKEN}"   # token 从 connection.json 的 Authorization 取，建议放 ~/.hermes/.env 而非明文
+    # 可选：只暴露只读工具（服务端另有审批/掩码，这里是客户端侧过滤）
+    # tools:
+    #   include: [list_databases, list_groups, list_entries, get_entry, search_entries, get_audit_log]
+    #   exclude: [delete_group, restore_backup]          # 黑名单例：破坏性工具
+    # 可选：hermes 层写审批（与插件弹窗审批叠加）
+    # trust: untrusted
+```
+
+- 连接后工具以 `mcp__keepassmcp__<tool>` 命名（如 `mcp__keepassmcp__read_secret`，hermes 沿 Claude Code/Codex 约定）。
+- 传输默认即 Streamable HTTP，无需额外 `transport` 字段；token 从 `%APPDATA%\KeePassMCP\connection.json` 的 `mcp_client.headers.Authorization` 复制。
+
+**Claude Code / 其他 type-http 客户端**（`.mcp.json` 或 `claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "keepassmcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:53029/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+**通用要点**：KeePassMCP 是 Streamable HTTP（非 stdio、非 SSE），任何支持 MCP HTTP transport 的客户端都能连；端口每次启动可能变化，token 每次启动持久不变（在 `token` 文件），建议客户端用 `connection.json` 里的最新值或脚本动态注入。
+
 命令行快速验证（PowerShell）：
 
 ```powershell
