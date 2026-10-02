@@ -65,9 +65,10 @@ namespace KeePassMCP.Core
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
 
-            // 含保护字段 → 密钥访问审批（§6.6，P3 接入；白名单免审批 / 弹窗 60s）
+            // 含保护字段 → 密钥访问审批（§6.6，P3 接入；白名单免审批 / 弹窗 60s）。
+            // P5：dry-run 预览不触发审批（零副作用，不打扰用户）；预览中保护字段 old/new 均掩码，执行时才需审批。
             var protectedNames = fields.Keys.Where(f => IsProtectedFieldName(entry, f, extraMasked)).ToList();
-            if (protectedNames.Count > 0)
+            if (protectedNames.Count > 0 && !dryRun)
             {
                 string method;
                 ApprovalOutcome outcome;
@@ -88,12 +89,14 @@ namespace KeePassMCP.Core
             foreach (var kv in fields)
             {
                 string oldValue = entry.Strings.ReadSafe(kv.Key);
+                bool isProt = IsProtectedFieldName(entry, kv.Key, extraMasked);
+                // dry-run 预览：保护字段 old/new 一律掩码，不泄露明文（Q7 读出口掩码）
                 changes.Add(new Dictionary<string, object>
                 {
                     ["action"] = "update_field",
                     ["target"] = Target(entry),
-                    ["old"] = oldValue,
-                    ["new"] = kv.Value
+                    ["old"] = (dryRun && isProt) ? "[protected]" : oldValue,
+                    ["new"] = (dryRun && isProt) ? "[protected]" : kv.Value
                 });
             }
             // 审计安全参数：只列字段名，不记字段值
@@ -102,7 +105,7 @@ namespace KeePassMCP.Core
                 ["entry_uuid"] = entryUuid,
                 ["fields"] = fields.Keys.Select(k => k + ":[set]").ToList()
             };
-            return RunWrite(db, "update_entry_fields", entryUuid, dryRun, changes,
+            Dictionary<string, object> result = RunWrite(db, "update_entry_fields", entryUuid, dryRun, changes,
                 () =>
                 {
                     foreach (var kv in fields)
@@ -113,6 +116,10 @@ namespace KeePassMCP.Core
                     }
                     entry.Touch(true);
                 }, safeArgs);
+            if (dryRun && protectedNames.Count > 0)
+                ((Dictionary<string, object>)result["data"])["note"] =
+                    "预览包含保护字段（已掩码）；执行时将弹窗审批（白名单条目免审批）";
+            return result;
         }
 
         private static string OutcomeAction(ApprovalOutcome o) =>

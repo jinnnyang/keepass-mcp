@@ -2,7 +2,7 @@
 
 **KeePass 原生 MCP 插件**：对本机暴露 MCP 服务（Streamable HTTP），本地 Agent 连接后**可见/可操作除掩码字段外的所有字段**——重新分类、重新命名、整理元数据，密码等受保护字段在协议层、实现层、数据层三层不可达。
 
-> 状态：**P0–P4 完成（P4：配置 UI 菜单 工具→KeePassMCP 配置 + 弹窗倒计时打磨 + 多库路由真实验证；逻辑探针 137/137）**。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
+> 状态：**P0–P5 完成（P5：dry-run 审批语义修复——预览不弹窗、保护字段掩码；逻辑探针 143/143；真实测试库集成验证全绿）**。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
 
 ## 一句话定位
 
@@ -57,4 +57,4 @@ keepass-mcp/
 
 ## 下一步
 
-**P0**（SDK/HttpListener/插件加载/掩码 API）、**P1 只读**、**P2 写操作**、**P3 密钥访问**（read_secret + 白名单 + KeePass UI 弹窗审批 60s 超时拒绝 + update 保护字段审批 + restore_backup + 并发；真实测试库集成验证全绿含用户点"允许"弹窗审批）与 **P4 配置 UI 与打磨**（菜单 工具→KeePassMCP 配置：白名单/敏感字段/开关可视化；弹窗倒计时打磨；多库路由真实验证通过）均已完成（2026-10-02）。按 [docs/HANDOFF.md](docs/HANDOFF.md) §13 推进：**P5 收尾打磨**（dry_run 弹窗审批提示优化、真实库锁定态人工确认）。
+**P0**（SDK/HttpListener/插件加载/掩码 API）、**P1 只读**、**P2 写操作**、**P3 密钥访问**（read_secret + 白名单 + KeePass UI 弹窗审批 60s 超时拒绝 + update 保护字段审批 + restore_backup + 并发；真实测试库集成验证全绿含用户点"允许"弹窗审批）、**P4 配置 UI**（菜单 工具→KeePassMCP 配置 + 弹窗倒计时 + 多库路由验证）与 **P5 收尾**（dry-run 审批语义修复：预览不弹窗、保护字段掩码；探针 143/143）均已完成（2026-10-02）。剩余人工确认项见 [docs/DESIGN.md](docs/DESIGN.md) §12（锁定态、UI 可见变化、配置窗口/弹窗目视）。

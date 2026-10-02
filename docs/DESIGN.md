@@ -208,11 +208,14 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P5 收尾打磨）
+## 12. 下一步（人工确认与长期打磨）
 
-**P4 配置 UI 与打磨已完成（2026-10-02）**：插件菜单 **工具 → KeePassMCP 配置...**（`Plugin.GetMenuItem`）打开配置窗口——白名单/附加敏感字段 ListBox 编辑（UUID 格式校验）+ `confirm_writes` 开关，保存写回 config.json；`ApprovalForm` 倒计时打磨（剩余秒数每秒刷新、最后 10s 红字）。**多库路由真实集成验证通过**：双测试库同时打开，list_databases 返回 2 库、两库各自 create_entry、同一 UUID 跨库查询 entry_not_found（隔离正确）。逻辑探针 137/137 回归全绿。测试痕迹已清理。
+**P5 收尾打磨已完成（2026-10-02）**：修复 `update_entry_fields` dry-run 审批语义（P2/P3 遗留：dry-run 也弹窗、预览泄露保护字段明文）——dry-run 不触发审批、保护字段 old/new 掩码、响应加 note 提示执行时审批。探针 143/143；真实测试库验证 dry-run 54ms 不弹窗、审计无明文。测试痕迹已清理。
 
-进入 **P5**（按 HANDOFF §13）：
-1. `dry_run` 弹窗审批提示优化（预览时避免触发审批弹窗误导）
-2. 真实库锁定态人工确认、写操作 UI 可见变化人工确认
-3. 可选的 GUI 自动化端到端（future）
+**剩余人工确认项**（需你本人在 KeePass 里操作）：
+1. KeePass 锁定库（菜单 文件→锁定 或 Ctrl+L）后，写工具应返回 `database_locked`，解锁后恢复
+2. `rename_entry` 等写操作后 KeePass UI 可见条目/分组变化
+3. 菜单 工具→KeePassMCP 配置... 窗口功能目视
+4. 非白名单条目 `read_secret` 弹窗倒计时效果目视（最后 10s 红字）
+
+**长期可选项**：GUI 自动化端到端（future，computer_use 隔离环境下不可行）

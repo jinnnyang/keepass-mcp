@@ -493,6 +493,24 @@ namespace P1Probe.Tools
                 new Dictionary<string, string> { ["Secret"] = "x" }, false, false, extraSecret);
             Check("p3 update 附加清单字段拒绝 → approval_denied", !Ok(env) && ErrCode(env) == "approval_denied");
 
+            // ---- 4.5) P5：update dry-run 含保护字段 —— 不弹窗 + 预览掩码 + note（dry-run 零副作用） ----
+            var approveDry = new FakeApproval { Next = ApprovalOutcome.Allowed };
+            string pwBeforeDry = FindEntry(db, apiUuid).Strings.ReadSafe("Password");
+            env = WriteHandlers.UpdateEntryFields(db, approveDry, new HashSet<string>(), apiUuid,
+                new Dictionary<string, string> { ["Password"] = "dry-preview-pw" }, false, true, extra);
+            Check("p5 update dry-run 含保护字段 ok", Ok(env) && Json(env).GetProperty("data").GetProperty("dry_run").GetBoolean());
+            Check("p5 update dry-run 不弹窗", approveDry.Requests.Count == 0);
+            string chOld = "", chNew = "";
+            foreach (var ch in Json(env).GetProperty("data").GetProperty("changes").EnumerateArray())
+            {
+                if (ch.TryGetProperty("old", out var o)) chOld = o.GetString();
+                if (ch.TryGetProperty("new", out var n)) chNew = n.GetString();
+            }
+            Check("p5 update dry-run 预览 old 掩码", chOld == "[protected]");
+            Check("p5 update dry-run 预览 new 掩码", chNew == "[protected]");
+            Check("p5 update dry-run note 提示存在", Json(env).GetProperty("data").TryGetProperty("note", out var _));
+            Check("p5 update dry-run 库无变化", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == pwBeforeDry);
+
             // ---- 5) restore_backup ----
             env = WriteHandlers.BackupDatabase(db);
             Check("p3 backup ok", Ok(env));
