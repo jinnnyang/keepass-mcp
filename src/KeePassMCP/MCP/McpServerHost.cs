@@ -12,8 +12,10 @@ using Newtonsoft.Json.Linq;
 namespace KeePassMCP.MCP
 {
     /// <summary>
-    /// MCP Streamable HTTP 服务宿主（最小实现，HANDOFF §6.2）：
-    /// HttpListener 绑定 127.0.0.1 随机端口 + Bearer token 鉴权 + Host 头白名单 + JSON-RPC 2.0 信封。
+    /// MCP Streamable HTTP 服务宿主（最小实现，HANDOFF §6.2；ADR-0003 字段授权）：
+    /// HttpListener 按库内 _mcp_listening 监听（`;` 分隔多地址，默认 127.0.0.1:6789，端口占用自动 +1）
+    /// + Bearer token 并集鉴权（_mcp_token 并集，任一匹配放行；并集为空 → 取消鉴权，仅回环）
+    /// + Host 头白名单（localhost + 全部监听地址）+ JSON-RPC 2.0 信封。
     /// 无状态（不维护会话）：每个请求独立处理；通知类请求返回 202 空体。
     /// JSON 用 Newtonsoft.Json（零依赖，规避 net48 无 binding redirect 的 Unsafe 版本冲突）。
     /// </summary>
@@ -21,9 +23,9 @@ namespace KeePassMCP.MCP
     {
         private const string ProtocolVersion = "2025-06-18";
         private const int MaxBodyBytes = 1_048_576;
+        private const int PortRetryMax = 50;
 
         private readonly KeePassFacade _facade;
-        private readonly IApproval _approval;
         private readonly ISet<string> _extraMasked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>宿主门面（菜单项打开配置窗口时作 owner）。</summary>
@@ -33,8 +35,11 @@ namespace KeePassMCP.MCP
         private int _port;
         private bool _running;
 
-        /// <summary>当前生效的 Bearer token（P6：库内 KeePassMCP.Server/CustomData.Token 优先，回退自动生成）。</summary>
-        private string _activeToken;
+        /// <summary>当前生效的监听地址列表（host:port）。</summary>
+        private List<string> _listeningSpecs = new List<string>();
+
+        /// <summary>当前生效的 Bearer token 并集（ADR-0003：_mcp_token 并集；空列表 = 无鉴权态）。</summary>
+        private List<string> _activeTokens = new List<string>();
 
         public int Port => _port;
 
@@ -44,40 +49,69 @@ namespace KeePassMCP.MCP
         public McpServerHost(IPluginHost host)
         {
             _facade = new KeePassFacade(host);
-            _approval = new UiApprovalProvider(_facade.MainWindow);
             LoadExtraMasked();
         }
 
-        /// <summary>解析生效 token：库内配置条目 CustomData.Token 优先，未找到回退自动生成（向后兼容）。</summary>
-        public string ResolveToken()
+        /// <summary>解析生效 token 并集：库内全部配置条目 _mcp_token 并集；为空 → 自动生成兜底（保持向后兼容的鉴权默认）。</summary>
+        public List<string> ResolveTokens()
         {
             try
             {
-                PwEntry server = LibraryConfig.FindServerEntry(_facade.GetDatabases(), out PwDatabase owner);
-                if (server != null)
+                var dbs = _facade.GetDatabases();
+                var tokens = LibraryConfig.CollectTokens(dbs);
+                if (tokens.Count > 0)
                 {
-                    string custom = LibraryConfig.GetCustomToken(server);
-                    if (custom != null)
-                    {
-                        Log.Write($"MCP token 来自库内配置条目（{SafeDbName(owner)} / {server.Strings.ReadSafe("Title")}）");
-                        return custom;
-                    }
+                    var cfgs = LibraryConfig.FindConfigEntries(dbs);
+                    if (cfgs.Count > 0)
+                        Log.Write($"MCP token 来自库内配置条目（{cfgs.Count} 个配置条目并集，{tokens.Count} 个 token）");
+                    return tokens;
                 }
             }
-            catch (Exception ex) { Log.Write("ResolveToken 库内读取失败，回退自动生成: " + ex.Message); }
-            return AuthToken.GetOrCreate();
+            catch (Exception ex) { Log.Write("ResolveTokens 库内读取失败，回退自动生成: " + ex.Message); }
+            // 无库内 token：自动生成兜底（ADR-0003 Q2：默认随机 token；无 token 态须用户显式清空并集）
+            return new List<string> { AuthToken.GetOrCreate() };
         }
 
-        /// <summary>刷新 token（库事件触发：FileOpened 后重读库内配置）；变化时重写 connection.json。</summary>
+        /// <summary>解析监听地址：库内 _mcp_listening 并集；无 → 默认 127.0.0.1:6789。</summary>
+        public List<string> ResolveListeningSpecs()
+        {
+            try { return LibraryConfig.CollectListeningSpecs(_facade.GetDatabases()); }
+            catch (Exception ex)
+            {
+                Log.Write("ResolveListeningSpecs failed: " + ex.Message);
+                return new List<string> { LibraryConfig.DefaultListening };
+            }
+        }
+
+        /// <summary>刷新 token/监听（库事件触发：FileOpened/FileSaved 后重读）；变化时重启监听或重写 connection.json。</summary>
         public void RefreshToken()
         {
-            string next = ResolveToken();
-            if (next != _activeToken)
+            var nextTokens = ResolveTokens();
+            var nextSpecs = ResolveListeningSpecs();
+            bool changed = !SameList(nextTokens, _activeTokens) || !SameList(nextSpecs, _listeningSpecs);
+            if (!changed) return;
+            _activeTokens = nextTokens;
+            if (SameList(nextSpecs, _listeningSpecs))
             {
-                _activeToken = next;
                 if (_running) WriteConnectionFile();
-                Log.Write("MCP token 已刷新");
+                Log.Write("MCP token/监听 已刷新");
             }
+            else
+            {
+                // 监听地址变化 → 重启监听（保持运行状态）
+                bool wasRunning = _running;
+                Stop();
+                if (wasRunning) Start();
+                Log.Write("MCP 监听地址已更新");
+            }
+        }
+
+        private static bool SameList(List<string> a, List<string> b)
+        {
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+                if (!string.Equals(a[i], b[i], StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
         }
 
         /// <summary>是否有解锁库（服务生命周期：锁库即停）。</summary>
@@ -87,23 +121,94 @@ namespace KeePassMCP.MCP
             catch { return false; }
         }
 
-        private static string SafeDbName(PwDatabase db)
-        {
-            try { return db.Name ?? ""; } catch { return ""; }
-        }
-
         public void Start()
         {
-            _activeToken = ResolveToken(); // 库内优先，回退自动生成
-            _port = ReservePort();
-            _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://127.0.0.1:{_port}/mcp/");
-            _listener.Start();
+            // ADR-0003 Q2：库内无任何配置条目 → 自动创建 MCPServerConfiguration（默认回环+随机 token+默认权限）
+            try { LibraryConfig.EnsureDefaultConfig(_facade.GetDatabases()); }
+            catch (Exception ex) { Log.Write("EnsureDefaultConfig failed: " + ex); }
+
+            _listeningSpecs = ResolveListeningSpecs();
+            _activeTokens = ResolveTokens();
+            if (!TryStartListener(_listeningSpecs, out _port, out _listener))
+            {
+                // 端口全部占用/不可绑定 → 端口自增重试（ADR-0003 Q2：目标端口被占用自动加一）
+                _listeningSpecs = IncrementPorts(_listeningSpecs);
+                for (int i = 0; i < PortRetryMax && _listener == null; i++)
+                {
+                    TryStartListener(_listeningSpecs, out _port, out _listener);
+                    if (_listener == null) _listeningSpecs = IncrementPorts(_listeningSpecs);
+                }
+                if (_listener == null)
+                {
+                    Log.Write("MCP listener start failed after port retries; falling back to random port");
+                    TryStartListener(new List<string> { $"127.0.0.1:{LibraryConfig.DefaultListening}" }, out _port, out _listener);
+                }
+            }
+            if (_listener == null) return; // 彻底失败，保持未运行
             _running = true;
             _listener.BeginGetContext(OnContext, null);
             WriteConnectionFile();
-            VerifyConnectionFile(); // P3：确认 connection.json 与实际端口一致（历史偶发旧端口）
-            Log.Write($"MCP server started: http://127.0.0.1:{_port}/mcp");
+            VerifyConnectionFile();
+            Log.Write($"MCP server started: {DescribeListening()}");
+        }
+
+        private static List<string> IncrementPorts(List<string> specs)
+        {
+            var next = new List<string>();
+            foreach (string s in specs)
+            {
+                int idx = s.LastIndexOf(':');
+                if (idx <= 0) { next.Add(s); continue; }
+                string host = s.Substring(0, idx);
+                string portStr = s.Substring(idx + 1);
+                if (int.TryParse(portStr, out int p))
+                {
+                    if (p < 65535) next.Add($"{host}:{p + 1}");
+                    else next.Add($"{host}:{p}");
+                }
+                else next.Add(s);
+            }
+            return next;
+        }
+
+        /// <summary>尝试用指定监听地址启动 HttpListener（全部前缀一起加；失败返回 false 并置空 listener）。</summary>
+        private static bool TryStartListener(List<string> specs, out int port, out HttpListener listener)
+        {
+            port = 0;
+            listener = null;
+            if (specs == null || specs.Count == 0) return false;
+            try
+            {
+                var l = new HttpListener();
+                foreach (string spec in specs)
+                {
+                    if (string.IsNullOrWhiteSpace(spec)) continue;
+                    string s = spec.Trim();
+                    if (!s.Contains(":")) continue;
+                    l.Prefixes.Add($"http://{s}/mcp/");
+                }
+                if (l.Prefixes.Count == 0) return false;
+                l.Start();
+                // 端口取第一个地址的端口（connection.json 主入口）
+                string first = specs[0];
+                int idx = first.LastIndexOf(':');
+                if (idx > 0 && int.TryParse(first.Substring(idx + 1), out int p)) port = p;
+                listener = l;
+                return true;
+            }
+            catch
+            {
+                try { listener?.Close(); } catch { }
+                listener = null;
+                return false;
+            }
+        }
+
+        private string DescribeListening()
+        {
+            var parts = new List<string>();
+            foreach (string s in _listeningSpecs) parts.Add($"http://{s}/mcp");
+            return string.Join(", ", parts);
         }
 
         public void Stop()
@@ -150,25 +255,26 @@ namespace KeePassMCP.MCP
                 return;
             }
 
-            // 2) Host 头白名单：仅 127.0.0.1/localhost
+            // 2) Host 头白名单：localhost + 全部监听地址（ADR-0003 多地址；防 DNS 重绑定）
             string host = ctx.Request.Headers["Host"];
-            if (host == null ||
-                !(host.Equals($"127.0.0.1:{_port}", StringComparison.OrdinalIgnoreCase) ||
-                  host.Equals($"localhost:{_port}", StringComparison.OrdinalIgnoreCase)))
+            if (!IsHostAllowed(host))
             {
                 ctx.Response.StatusCode = 403;
                 return;
             }
 
-            // 3) Bearer token（恒定时间比较，防时序侧信道）
-            string auth = ctx.Request.Headers["Authorization"];
-            string provided = null;
-            if (auth != null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-                provided = auth.Substring(7).Trim();
-            if (!VerifyToken(provided))
+            // 3) Bearer token（并集任一匹配，恒定时间比较；无鉴权态=空集直接放行）
+            if (_activeTokens.Count > 0)
             {
-                ctx.Response.StatusCode = 401;
-                return; // 注意：WWW-Authenticate 是 HttpListener 受限响应头，不能直接赋值（会抛 ArgumentException）
+                string auth = ctx.Request.Headers["Authorization"];
+                string provided = null;
+                if (auth != null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                    provided = auth.Substring(7).Trim();
+                if (!VerifyToken(provided))
+                {
+                    ctx.Response.StatusCode = 401;
+                    return; // 注意：WWW-Authenticate 是 HttpListener 受限响应头，不能直接赋值（会抛 ArgumentException）
+                }
             }
 
             // 4) 读请求体（限长）
@@ -199,6 +305,19 @@ namespace KeePassMCP.MCP
             ctx.Response.ContentType = "application/json";
             ctx.Response.ContentLength64 = bytes.Length;
             ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        }
+
+        private bool IsHostAllowed(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return false;
+            foreach (string spec in _listeningSpecs)
+            {
+                if (host.Equals(spec, StringComparison.OrdinalIgnoreCase)) return true;
+                int idx = spec.LastIndexOf(':');
+                if (idx > 0 && host.Equals($"localhost:{spec.Substring(idx + 1)}", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         private void TryWrite(HttpListenerContext ctx, int status, string json)
@@ -259,7 +378,7 @@ namespace KeePassMCP.MCP
                         ["serverInfo"] = new Dictionary<string, object>
                         {
                             ["name"] = "KeePassMCP",
-                            ["version"] = "0.1.0"
+                            ["version"] = "0.2.0"
                         }
                     });
 
@@ -304,7 +423,7 @@ namespace KeePassMCP.MCP
             Dictionary<string, object> envelope;
             try
             {
-                envelope = ToolRegistry.Call(toolName, args, _facade, _approval, _extraMasked);
+                envelope = ToolRegistry.Call(toolName, args, _facade, _extraMasked);
             }
             catch (Exception ex)
             {
@@ -384,14 +503,19 @@ namespace KeePassMCP.MCP
                 }
             });
 
-        /// <summary>恒定时间校验 Bearer token（对当前生效 _activeToken）。</summary>
+        /// <summary>恒定时间校验 Bearer token（对当前生效 token 并集任一匹配；空集=无鉴权直接放行）。</summary>
         private bool VerifyToken(string provided)
         {
-            string expected = _activeToken;
-            if (expected == null || provided == null || provided.Length != expected.Length) return false;
-            int diff = 0;
-            for (int i = 0; i < expected.Length; i++) diff |= provided[i] ^ expected[i];
-            return diff == 0;
+            if (_activeTokens.Count == 0) return true; // 无鉴权态（用户显式清空 _mcp_token 并集）
+            if (provided == null) return false;
+            foreach (string expected in _activeTokens)
+            {
+                if (expected == null || provided.Length != expected.Length) continue;
+                int diff = 0;
+                for (int i = 0; i < expected.Length; i++) diff |= provided[i] ^ expected[i];
+                if (diff == 0) return true;
+            }
+            return false;
         }
 
         private static string BodyPreview(string body)
@@ -401,21 +525,6 @@ namespace KeePassMCP.MCP
         }
 
         // ---------- 启动辅助 ----------
-        private static int ReservePort()
-        {
-            // net48 的 TcpListener 不实现 IDisposable，用 try/finally Stop
-            var tcp = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-            try
-            {
-                tcp.Start();
-                return ((System.Net.IPEndPoint)tcp.LocalEndpoint).Port;
-            }
-            finally
-            {
-                tcp.Stop();
-            }
-        }
-
         private void LoadExtraMasked()
         {
             try
@@ -439,24 +548,42 @@ namespace KeePassMCP.MCP
             catch (Exception ex) { Log.Write("LoadExtraMasked failed: " + ex); }
         }
 
+        private string PrimaryUrl()
+        {
+            // 客户端主入口：首个回环地址（如有），否则首个地址
+            foreach (string s in _listeningSpecs)
+            {
+                int idx = s.LastIndexOf(':');
+                string host = idx > 0 ? s.Substring(0, idx) : s;
+                if (host == "127.0.0.1" || host == "localhost" || host == "::1") return $"http://{s}/mcp";
+            }
+            return _listeningSpecs.Count > 0 ? $"http://{_listeningSpecs[0]}/mcp" : $"http://127.0.0.1:{_port}/mcp";
+        }
+
         private void WriteConnectionFile()
         {
             try
             {
+                string url = PrimaryUrl();
+                var headers = new Dictionary<string, object>();
+                if (_activeTokens.Count > 0)
+                    headers["Authorization"] = "Bearer " + _activeTokens[0];
+                var client = new Dictionary<string, object>
+                {
+                    ["type"] = "http",
+                    ["url"] = url
+                };
+                client["headers"] = headers;
+                if (_activeTokens.Count == 0)
+                    client["authentication"] = "none"; // 无鉴权态提示
+
                 var info = new Dictionary<string, object>
                 {
                     ["port"] = _port,
-                    ["url"] = $"http://127.0.0.1:{_port}/mcp",
+                    ["url"] = url,
+                    ["listening"] = _listeningSpecs,
                     ["token_file"] = ConfigPaths.TokenFile,
-                    ["mcp_client"] = new Dictionary<string, object>
-                    {
-                        ["type"] = "http",
-                        ["url"] = $"http://127.0.0.1:{_port}/mcp",
-                        ["headers"] = new Dictionary<string, object>
-                        {
-                            ["Authorization"] = "Bearer " + (_activeToken ?? ResolveToken())
-                        }
-                    }
+                    ["mcp_client"] = client
                 };
                 File.WriteAllText(ConfigPaths.ConnectionFile,
                     JsonConvert.SerializeObject(info, Formatting.Indented));

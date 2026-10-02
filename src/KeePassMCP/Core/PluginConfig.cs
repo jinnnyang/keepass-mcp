@@ -6,8 +6,8 @@ using Newtonsoft.Json.Linq;
 namespace KeePassMCP.Core
 {
     /// <summary>
-    /// 插件配置（config.json）：附加敏感字段清单、密钥访问白名单、全局确认开关。
-    /// 白名单按条目 UUID（HANDOFF §6.6）；P3 起由本类统一读取。
+    /// 插件配置（config.json，ADR-0003 后仅剩附加敏感字段清单）：
+    /// 授权模型已迁移到库内 _mcp_ 字段体系（ADR-0003），白名单/确认开关废止。
     /// </summary>
     public static class PluginConfig
     {
@@ -31,19 +31,5 @@ namespace KeePassMCP.Core
                     if (t.Type == JTokenType.String) set.Add((string)t);
             return set;
         }
-
-        /// <summary>密钥访问白名单（条目 UUID 列表，白名单条目对 read_secret/保护字段更新免审批）。</summary>
-        public static ISet<string> SecretWhitelist()
-        {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var arr = Load()["secret_whitelist"] as JArray;
-            if (arr != null)
-                foreach (var t in arr)
-                    if (t.Type == JTokenType.String) set.Add((string)t);
-            return set;
-        }
-
-        /// <summary>全局"写需确认"开关（Q3）。</summary>
-        public static bool ConfirmWrites() => Load().Value<bool?>("confirm_writes") == true;
     }
 }

@@ -10,35 +10,51 @@ using Newtonsoft.Json.Linq;
 namespace KeePassMCP.Core
 {
     /// <summary>
-    /// 写工具核心（P2，HANDOFF §4.2/§7）。
+    /// 写工具核心（P2，HANDOFF §4.2/§7；ADR-0003 字段授权）：
     /// 统一语义：每个写操作 = 计算变更列表（预览） + 执行（apply）。
     /// dry_run=true → 只返回 {dry_run:true, changes, summary}，零副作用（不落库/不备份/不审计）。
     /// dry_run=false → 写前快照 → apply → db.Modified=true → 审计 → {dry_run:false, changes, summary, executed:true}。
+    /// 权限（ADR-0003）：非破坏性写操作按操作类型判定 _mcp_write / _mcp_write_protected / _mcp_move
+    /// （条目字段 → 配置条目 default → 硬编码默认）；create_entry 免权限（Q1：创建写入免审批）。
+    /// _mcp_ 前缀字段名为插件保留：create/update 一律拒绝（reserved_field，防 Agent 自授权）。
+    /// 破坏性操作（delete_group / restore_backup）保留 confirm:true 硬约束。
     /// 不变量：审计 args 由各工具构造为安全参数（不含保护字段明文）；备份经掩码序列化器。
     /// 调用方（ToolRegistry）必须将写操作 marshal 到 UI 线程执行。
     /// </summary>
     public static class WriteHandlers
     {
-        // ================= 确认开关（Q3：全局"写需确认"） =================
-        public static bool ConfirmWritesRequired() => PluginConfig.ConfirmWrites();
+        // ================= 权限辅助 =================
+        private static IEnumerable<PwDatabase> DbsOf(PwDatabase db) =>
+            new List<PwDatabase> { db };
 
-        private static Dictionary<string, object> RequireConfirm(bool confirm)
+        private static Dictionary<string, object> RequirePermission(PwDatabase db, PwEntry entry,
+            LibraryConfig.MCPPermission perm, string op)
         {
-            return (ConfirmWritesRequired() && !confirm)
-                ? ToolHandlers.Err("confirmation_required", "全局写需确认开关已开启，此写操作需要 confirm:true")
-                : null;
+            if (!LibraryConfig.ResolvePermission(entry, perm, DbsOf(db)))
+                return ToolHandlers.Err("permission_denied",
+                    $"操作 {op} 无权限：需条目字段 {LibraryConfig.PermissionEntryField(perm)}=1（或配置条目默认允许）");
+            return null;
+        }
+
+        private static Dictionary<string, object> RejectMcpFields(IDictionary<string, string> fields)
+        {
+            if (fields != null)
+                foreach (string k in fields.Keys)
+                    if (LibraryConfig.IsMcpField(k))
+                        return ToolHandlers.Err("reserved_field",
+                            $"字段名 {k} 为插件保留（_mcp_ 前缀），只能通过 KeePass 界面或 MCP Server Config 页配置");
+            return null;
         }
 
         // ================= rename_entry =================
-        public static Dictionary<string, object> RenameEntry(PwDatabase db, string entryUuid, string newTitle,
-            bool confirm, bool dryRun)
+        public static Dictionary<string, object> RenameEntry(PwDatabase db, string entryUuid, string newTitle, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(newTitle))
                 return ToolHandlers.Err("invalid_params", "new_title 不能为空");
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.Write, "rename_entry");
+            if (denied != null) return denied;
 
             string oldTitle = entry.Strings.ReadSafe("Title");
             var change = new Dictionary<string, object>
@@ -54,40 +70,27 @@ namespace KeePassMCP.Core
         }
 
         // ================= update_entry_fields =================
-        public static Dictionary<string, object> UpdateEntryFields(PwDatabase db, IApproval approval,
-            ISet<string> whitelist, string entryUuid, Dictionary<string, string> fields,
-            bool confirm, bool dryRun, ISet<string> extraMasked)
+        public static Dictionary<string, object> UpdateEntryFields(PwDatabase db, string entryUuid,
+            Dictionary<string, string> fields, bool dryRun, ISet<string> extraMasked)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (fields == null || fields.Count == 0)
                 return ToolHandlers.Err("invalid_params", "fields 不能为空");
+            var rejected = RejectMcpFields(fields);
+            if (rejected != null) return rejected;
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
 
-            // P6 黑名单：命中 KeePassMCP-Blacklist 标签的条目拒绝写入（dry-run 同拒，语义一致）
-            if (LibraryConfig.CollectTaggedUuids(db, LibraryConfig.BlacklistTag)
-                    .Contains(entry.Uuid.ToHexString()))
-                return ToolHandlers.Err("blacklisted", $"条目 {entryUuid} 在黑名单中，拒绝写入");
-
-            // 含保护字段 → 密钥访问审批（§6.6，P3 接入；白名单免审批 / 弹窗 60s）。
-            // P5：dry-run 预览不触发审批（零副作用，不打扰用户）；预览中保护字段 old/new 均掩码，执行时才需审批。
+            // 权限（硬闸门，dry-run 同拒）：含保护字段 → _mcp_write_protected；非保护 → _mcp_write
             var protectedNames = fields.Keys.Where(f => IsProtectedFieldName(entry, f, extraMasked)).ToList();
-            if (protectedNames.Count > 0 && !dryRun)
+            if (protectedNames.Count > 0)
             {
-                string method;
-                ApprovalOutcome outcome;
-                bool allowed = SecretHandlers.TryApprove(db, entry, approval, whitelist,
-                    "update_protected_fields", protectedNames, out outcome, out method);
-                AuditLog.Write("approval",
-                    new Dictionary<string, object> { ["action"] = OutcomeAction(outcome), ["method"] = method },
-                    entry.Uuid.ToHexString(), true, null, false);
-                if (!allowed)
-                {
-                    string code = outcome == ApprovalOutcome.TimedOut ? "approval_timeout" : "approval_denied";
-                    return ToolHandlers.Err(code,
-                        outcome == ApprovalOutcome.TimedOut ? "审批超时（60s），已拒绝" : "审批被拒绝，库无变化");
-                }
+                var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.WriteProtected, "update_entry_fields");
+                if (denied != null) return denied;
+            }
+            if (fields.Keys.Count != protectedNames.Count)
+            {
+                var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.Write, "update_entry_fields");
+                if (denied != null) return denied;
             }
 
             var changes = new List<Dictionary<string, object>>();
@@ -121,23 +124,16 @@ namespace KeePassMCP.Core
                     }
                     entry.Touch(true);
                 }, safeArgs);
-            if (dryRun && protectedNames.Count > 0)
-                ((Dictionary<string, object>)result["data"])["note"] =
-                    "预览包含保护字段（已掩码）；执行时将弹窗审批（白名单条目免审批）";
             return result;
         }
 
-        private static string OutcomeAction(ApprovalOutcome o) =>
-            o == ApprovalOutcome.Allowed ? "allowed" : o == ApprovalOutcome.TimedOut ? "timeout" : "denied";
-
         // ================= move_entry =================
-        public static Dictionary<string, object> MoveEntry(PwDatabase db, string entryUuid, string targetGroupUuid,
-            bool confirm, bool dryRun)
+        public static Dictionary<string, object> MoveEntry(PwDatabase db, string entryUuid, string targetGroupUuid, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.Move, "move_entry");
+            if (denied != null) return denied;
             PwGroup target = FindGroup(db, targetGroupUuid);
             if (target == null) return ToolHandlers.Err("group_not_found", $"分组 {targetGroupUuid} 未找到");
             if (entry.ParentGroup != null && entry.ParentGroup.Uuid.Equals(target.Uuid))
@@ -164,18 +160,14 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["target_group_uuid"] = targetGroupUuid });
         }
 
-        // ================= create_entry（含密钥写入，免审批） =================
+        // ================= create_entry（含密钥写入，免权限——Q1 创建写入免审批） =================
         public static Dictionary<string, object> CreateEntry(PwDatabase db, string groupUuid, string title,
-            Dictionary<string, string> fields, JToken generatePassword, bool confirm, bool dryRun)
+            Dictionary<string, string> fields, JToken generatePassword, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(title))
                 return ToolHandlers.Err("invalid_params", "title 不能为空");
-            // P6：KeePassMCP.* 前缀为插件配置条目保留（防 Agent 创建配置条目后读不回/误判）
-            if (title.StartsWith(LibraryConfig.ServerPrefix, StringComparison.OrdinalIgnoreCase))
-                return ToolHandlers.Err("reserved_title",
-                    $"标题前缀 {LibraryConfig.ServerPrefix} 为插件配置条目保留，请改用其他标题");
+            var rejected = RejectMcpFields(fields);
+            if (rejected != null) return rejected;
             PwGroup group = FindGroup(db, groupUuid);
             if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
 
@@ -273,13 +265,12 @@ namespace KeePassMCP.Core
         }
 
         // ================= create_group =================
-        public static Dictionary<string, object> CreateGroup(PwDatabase db, string parentGroupUuid, string name,
-            bool confirm, bool dryRun)
+        public static Dictionary<string, object> CreateGroup(PwDatabase db, string parentGroupUuid, string name, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(name))
                 return ToolHandlers.Err("invalid_params", "name 不能为空");
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Write, "create_group");
+            if (denied != null) return denied;
             PwGroup parent = FindGroup(db, parentGroupUuid);
             if (parent == null) return ToolHandlers.Err("group_not_found", $"父分组 {parentGroupUuid} 未找到");
 
@@ -300,13 +291,12 @@ namespace KeePassMCP.Core
         }
 
         // ================= rename_group =================
-        public static Dictionary<string, object> RenameGroup(PwDatabase db, string groupUuid, string newName,
-            bool confirm, bool dryRun)
+        public static Dictionary<string, object> RenameGroup(PwDatabase db, string groupUuid, string newName, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(newName))
                 return ToolHandlers.Err("invalid_params", "new_name 不能为空");
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Write, "rename_group");
+            if (denied != null) return denied;
             PwGroup group = FindGroup(db, groupUuid);
             if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
 
@@ -323,11 +313,13 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["group_uuid"] = groupUuid, ["new_name"] = newName });
         }
 
-        // ================= delete_group（破坏性，confirm 硬约束） =================
+        // ================= delete_group（破坏性，confirm 硬约束 + Move 权限） =================
         public static Dictionary<string, object> DeleteGroup(PwDatabase db, string groupUuid, bool confirm, bool dryRun)
         {
             if (!confirm)
                 return ToolHandlers.Err("confirmation_required", "delete_group 是破坏性操作，需要 confirm:true");
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Move, "delete_group");
+            if (denied != null) return denied;
             PwGroup group = FindGroup(db, groupUuid);
             if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
             if (group.ParentGroup == null)
@@ -349,15 +341,15 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["group_uuid"] = groupUuid, ["entry_count"] = entryCount });
         }
 
-        // ================= add_tag / remove_tag =================
-        public static Dictionary<string, object> AddTag(PwDatabase db, string entryUuid, string tag, bool confirm, bool dryRun)
+        // ================= add_tag / remove_tag（元数据写 → Write 权限） =================
+        public static Dictionary<string, object> AddTag(PwDatabase db, string entryUuid, string tag, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(tag))
                 return ToolHandlers.Err("invalid_params", "tag 不能为空");
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.Write, "add_tag");
+            if (denied != null) return denied;
             if (entry.HasTag(tag)) return ToolHandlers.Err("no_op", $"条目已有标签 {tag}");
 
             var change = new Dictionary<string, object>
@@ -369,14 +361,14 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["tag"] = tag });
         }
 
-        public static Dictionary<string, object> RemoveTag(PwDatabase db, string entryUuid, string tag, bool confirm, bool dryRun)
+        public static Dictionary<string, object> RemoveTag(PwDatabase db, string entryUuid, string tag, bool dryRun)
         {
-            var req = RequireConfirm(confirm);
-            if (req != null) return req;
             if (string.IsNullOrWhiteSpace(tag))
                 return ToolHandlers.Err("invalid_params", "tag 不能为空");
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
+            var denied = RequirePermission(db, entry, LibraryConfig.MCPPermission.Write, "remove_tag");
+            if (denied != null) return denied;
             if (!entry.HasTag(tag)) return ToolHandlers.Err("no_op", $"条目没有标签 {tag}");
 
             var change = new Dictionary<string, object>
@@ -388,7 +380,7 @@ namespace KeePassMCP.Core
                 new Dictionary<string, object> { ["entry_uuid"] = entryUuid, ["tag"] = tag });
         }
 
-        // ================= backup_database（显式整库快照） =================
+        // ================= backup_database（显式整库快照，读性质） =================
         public static Dictionary<string, object> BackupDatabase(PwDatabase db)
         {
             string path = BackupStore.SnapshotDatabase(db, "backup_database");
@@ -406,12 +398,14 @@ namespace KeePassMCP.Core
             });
         }
 
-        // ================= restore_backup（管理员破坏性；仅恢复非保护字段，保护字段不触碰） =================
+        // ================= restore_backup（破坏性，confirm 硬约束 + Write 权限；仅恢复非保护字段） =================
         public static Dictionary<string, object> RestoreBackup(PwDatabase db, string backupId,
             bool confirm, bool dryRun, ISet<string> extraMasked)
         {
             if (!confirm)
                 return ToolHandlers.Err("confirmation_required", "restore_backup 是破坏性操作，需要 confirm:true");
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Write, "restore_backup");
+            if (denied != null) return denied;
             string path = System.IO.Path.Combine(ConfigPaths.BackupsDir, backupId + ".json");
             if (!System.IO.File.Exists(path))
                 return ToolHandlers.Err("backup_not_found", $"备份 {backupId} 不存在");

@@ -7,28 +7,37 @@ using KeePassLib.Security;
 namespace KeePassMCP.Core
 {
     /// <summary>
-    /// 密钥访问（HANDOFF §4.1 read_secret / §6.6 审批）：
-    /// 白名单条目免审批；非白名单走 KeePass UI 弹窗（60s 超时拒绝）。
-    /// 返回明文仅此一次；审计逐字段记录（只记字段名，不含值）；审批事件单独记录。
+    /// 密钥访问（HANDOFF §4.1 read_secret / ADR-0003 字段授权）：
+    /// 明文仅当条目 _mcp_read_protected=1（或配置条目 default 允许）时返回；
+    /// 无权限 → permission_denied（不弹窗、不返回明文）。返回明文仅此一次；审计逐字段记录（只记字段名，不含值）。
     /// </summary>
     public static class SecretHandlers
     {
-        private static readonly TimeSpan ApprovalTimeout = TimeSpan.FromSeconds(60);
-
-        public static Dictionary<string, object> ReadSecret(PwDatabase db, IApproval approval,
-            ISet<string> whitelist, string entryUuid, List<string> fields)
+        public static Dictionary<string, object> ReadSecret(PwDatabase db, string entryUuid, List<string> fields)
         {
             PwEntry entry = WriteHandlers.FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
             string uuid = entry.Uuid.ToHexString();
 
-            // P6 保护规则①：KeePassMCP.* 配置条目禁止 read_secret（防 token 明文经审批进 Agent 上下文）
-            if (LibraryConfig.IsConfigEntry(entry))
-                return ToolHandlers.Err("token_entry_protected", "配置条目（KeePassMCP.*）禁止读取密钥");
+            // _mcp_list=0 → 隐身（视同不存在，不泄露存在性）
+            if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List,
+                    new List<PwDatabase> { db }))
+                return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
 
-            // P6 黑名单：命中 KeePassMCP-Blacklist 标签的条目硬拒绝（优先级高于白名单）
-            if (LibraryConfig.CollectTaggedUuids(db, LibraryConfig.BlacklistTag).Contains(uuid))
-                return ToolHandlers.Err("blacklisted", $"条目 {uuid} 在黑名单中，拒绝读取");
+            // ADR-0003：配置条目（_mcp_config=1）禁止读取密钥（防 token 明文经 Agent 上下文）
+            if (LibraryConfig.IsConfigEntry(entry))
+                return ToolHandlers.Err("token_entry_protected", "配置条目禁止读取密钥");
+
+            // 权限：读保护字段需 _mcp_read_protected（条目字段 → default → 硬编码拒绝）
+            if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.ReadProtected,
+                    new List<PwDatabase> { db }))
+            {
+                AuditLog.Write("read_secret",
+                    new Dictionary<string, object> { ["entry_uuid"] = uuid, ["fields"] = fields ?? new List<string>(), ["denied"] = "no_permission" },
+                    uuid, false, "permission_denied", false);
+                return ToolHandlers.Err("permission_denied",
+                    "条目未授予读保护字段权限（需 _mcp_read_protected=1 或配置条目默认允许）");
+            }
 
             // 收集该条目的保护字段（Password 恒计入）
             var protectedFields = new List<string>();
@@ -51,64 +60,14 @@ namespace KeePassMCP.Core
             if (requested.Count == 0)
                 return ToolHandlers.Err("no_protected_fields", "该条目没有受保护字段");
 
-            // 审批（白名单免审批 / 弹窗 60s）
-            string method;
-            ApprovalOutcome outcome;
-            bool allowed = TryApprove(db, entry, approval, whitelist, "read_secret", requested, out outcome, out method);
-            string action = OutcomeAction(outcome);
-            AuditLog.Write("approval", new Dictionary<string, object> { ["action"] = action, ["method"] = method },
-                uuid, true, null, false);
-
-            if (!allowed)
-            {
-                string code = outcome == ApprovalOutcome.TimedOut ? "approval_timeout" : "approval_denied";
-                string msg = outcome == ApprovalOutcome.TimedOut ? "审批超时（60s），已拒绝" : "审批被拒绝";
-                AuditLog.Write("read_secret",
-                    new Dictionary<string, object> { ["entry_uuid"] = uuid, ["fields"] = requested, ["approval"] = action },
-                    uuid, false, code, false);
-                return ToolHandlers.Err(code, msg);
-            }
-
             // 明文仅此一次返回
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (string f in requested)
                 values[f] = entry.Strings.Get(f).ReadString();
             AuditLog.Write("read_secret",
-                new Dictionary<string, object> { ["entry_uuid"] = uuid, ["fields"] = requested, ["approval"] = action },
+                new Dictionary<string, object> { ["entry_uuid"] = uuid, ["fields"] = requested },
                 uuid, true, null, false);
             return ToolHandlers.Ok(new Dictionary<string, object> { ["fields"] = values });
-        }
-
-        /// <summary>通用审批入口（read_secret 与 update_entry_fields 保护字段共用，§6.6）。</summary>
-        public static bool TryApprove(PwDatabase db, PwEntry entry, IApproval approval, ISet<string> whitelist,
-            string operation, List<string> fields, out ApprovalOutcome outcome, out string method)
-        {
-            string uuid = entry.Uuid.ToHexString();
-            if (whitelist != null && whitelist.Contains(uuid))
-            {
-                outcome = ApprovalOutcome.Allowed;
-                method = "whitelist";
-                return true;
-            }
-            method = "popup";
-            var request = new ApprovalRequest
-            {
-                DatabaseName = SafeDbName(db),
-                EntryTitle = entry.Strings.ReadSafe("Title"),
-                EntryUuid = uuid,
-                Operation = operation,
-                Fields = fields
-            };
-            outcome = approval != null ? approval.Confirm(request, ApprovalTimeout) : ApprovalOutcome.Denied;
-            return outcome == ApprovalOutcome.Allowed;
-        }
-
-        private static string OutcomeAction(ApprovalOutcome o) =>
-            o == ApprovalOutcome.Allowed ? "allowed" : o == ApprovalOutcome.TimedOut ? "timeout" : "denied";
-
-        private static string SafeDbName(PwDatabase db)
-        {
-            try { return db.Name ?? ""; } catch { return ""; }
         }
     }
 }

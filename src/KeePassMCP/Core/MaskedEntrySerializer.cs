@@ -13,10 +13,10 @@ namespace KeePassMCP.Core
     /// </summary>
     public static class MaskedEntrySerializer
     {
-        public static EntryDto ToDto(PwEntry entry, ISet<string> extraMaskedFields)
+        public static EntryDto ToDto(PwEntry entry, ISet<string> extraMaskedFields, bool contentHidden = false)
         {
-            // P6 保护规则②：配置条目（KeePassMCP.*）整条目掩码（标题也掩，防识别）
-            if (LibraryConfig.IsConfigEntry(entry))
+            // P6 保护规则②：配置条目（_mcp_config=1）整条目掩码；contentHidden（_mcp_read=0）同款输出（仅暴露 uuid/tags/路径）
+            if (LibraryConfig.IsConfigEntry(entry) || contentHidden)
             {
                 return new EntryDto
                 {
@@ -72,10 +72,10 @@ namespace KeePassMCP.Core
             return dto;
         }
 
-        public static EntrySummaryDto ToSummary(PwEntry entry, ISet<string> extraMaskedFields)
+        public static EntrySummaryDto ToSummary(PwEntry entry, ISet<string> extraMaskedFields, bool contentHidden = false)
         {
-            // P6 保护规则②：配置条目（KeePassMCP.*）整条目掩码（摘要层同理）
-            if (LibraryConfig.IsConfigEntry(entry))
+            // P6 保护规则②：配置条目（_mcp_config=1）整条目掩码（摘要层同理）；contentHidden 同款输出
+            if (LibraryConfig.IsConfigEntry(entry) || contentHidden)
             {
                 return new EntrySummaryDto
                 {
@@ -116,6 +116,7 @@ namespace KeePassMCP.Core
 
         private static bool IsMasked(string name, ProtectedString ps, ISet<string> extraMasked)
         {
+            if (LibraryConfig.IsMcpField(name)) return true; // ADR-0003：_mcp_ 前缀字段一律掩码（含 token，不依赖 Protected 标志）
             if (string.Equals(name, "Password", StringComparison.OrdinalIgnoreCase)) return true; // 硬掩码
             if (ps != null && ps.IsProtected) return true;
             if (extraMasked != null && extraMasked.Contains(name)) return true;

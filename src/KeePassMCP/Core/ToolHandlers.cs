@@ -116,7 +116,12 @@ namespace KeePassMCP.Core
 
             var list = new List<EntrySummaryDto>();
             foreach (PwEntry entry in group.Entries)
-                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked));
+            {
+                // ADR-0003：_mcp_list=0 隐身（过滤）；_mcp_read=0 内容隐藏（仅 uuid/标签/路径）
+                if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs)) continue;
+                bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
+                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked, !canRead));
+            }
             if (limit.HasValue && limit.Value > 0 && list.Count > limit.Value)
                 list = list.Take(limit.Value).ToList();
             return Ok(list);
@@ -133,7 +138,11 @@ namespace KeePassMCP.Core
             if (database.RootGroup == null) return Err("database_empty", "数据库没有根分组");
             PwEntry entry = FindEntryByUuid(database.RootGroup, entryUuid);
             if (entry == null) return Err("entry_not_found", $"entry_uuid {entryUuid} 未找到");
-            return Ok(MaskedEntrySerializer.ToDto(entry, extraMasked));
+            // ADR-0003：_mcp_list=0 → 隐身（视同不存在）；_mcp_read=0 → 内容隐藏
+            if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs))
+                return Err("entry_not_found", $"entry_uuid {entryUuid} 未找到");
+            bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
+            return Ok(MaskedEntrySerializer.ToDto(entry, extraMasked, !canRead));
         }
 
         // ---------- search_entries ----------
@@ -167,7 +176,12 @@ namespace KeePassMCP.Core
 
             var list = new List<EntrySummaryDto>();
             foreach (PwEntry entry in results)
-                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked));
+            {
+                // ADR-0003：_mcp_list=0 隐身（过滤）；_mcp_read=0 内容隐藏
+                if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs)) continue;
+                bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
+                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked, !canRead));
+            }
             if (limit.HasValue && limit.Value > 0 && list.Count > limit.Value)
                 list = list.Take(limit.Value).ToList();
             return Ok(list);
