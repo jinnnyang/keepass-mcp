@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="560" viewBox="0 0 920 560" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+  <rect width="920" height="560" fill="#f7f8fa" rx="10"/>
+  <text x="30" y="38" font-size="22" font-weight="700" fill="#1f2328">KeePassMCP 安全模型</text>
+  <text x="30" y="60" font-size="13" fill="#57606a">密钥三态边界 · 审批矩阵 · 掩码三层（docs/HANDOFF.md §6）</text>
+
+  <!-- 三态模型 -->
+  <g>
+    <rect x="30" y="88" width="270" height="130" rx="8" fill="#fff" stroke="#b7e4c7" stroke-width="1.5"/>
+    <text x="48" y="112" font-size="15" font-weight="700" fill="#1f2328">创建写入（免审批）</text>
+    <text x="48" y="134" font-size="12.5" fill="#24292f">create_entry 传 Password /</text>
+    <text x="48" y="152" font-size="12.5" fill="#24292f">generate_password 插件内生成</text>
+    <text x="48" y="172" font-size="12.5" fill="#57606a">明文不经 Agent 上下文（主推）</text>
+    <text x="48" y="192" font-size="12.5" fill="#57606a">写操作可被 confirm_writes 全局约束</text>
+  </g>
+  <g>
+    <rect x="325" y="88" width="270" height="130" rx="8" fill="#fff" stroke="#d0d7de" stroke-width="1.5"/>
+    <text x="343" y="112" font-size="15" font-weight="700" fill="#1f2328">读取 / 更新已有（需审批）</text>
+    <text x="343" y="134" font-size="12.5" fill="#24292f">read_secret：保护字段明文</text>
+    <text x="343" y="152" font-size="12.5" fill="#24292f">update 保护字段（Password 等）</text>
+    <text x="343" y="176" font-size="12.5" fill="#57606a">白名单（UUID）免审批 ｜</text>
+    <text x="343" y="194" font-size="12.5" fill="#57606a">否则 KeePass 弹窗 60s 超时拒绝</text>
+  </g>
+  <g>
+    <rect x="620" y="88" width="270" height="130" rx="8" fill="#fff" stroke="#e6d28a" stroke-width="1.5"/>
+    <text x="638" y="112" font-size="15" font-weight="700" fill="#1f2328">读出口 / 审计 / 备份（永不含明文）</text>
+    <text x="638" y="134" font-size="12.5" fill="#24292f">get_entry/list_entries：掩码 [protected]</text>
+    <text x="638" y="152" font-size="12.5" fill="#24292f">审计 JSONL：只记字段名不记值</text>
+    <text x="638" y="172" font-size="12.5" fill="#24292f">备份快照：仅非保护字段</text>
+    <text x="638" y="194" font-size="12.5" fill="#57606a">唯一明文出口：审批通过的 read_secret 一次</text>
+  </g>
+
+  <!-- 审批矩阵 -->
+  <rect x="30" y="246" width="860" height="132" rx="8" fill="#fff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="48" y="272" font-size="15" font-weight="700" fill="#1f2328">审批矩阵</text>
+  <g font-size="12.5">
+    <rect x="48" y="288" width="200" height="74" rx="6" fill="#f0fbf4" stroke="#b7e4c7"/>
+    <text x="60" y="310" fill="#24292f" font-weight="700">白名单命中（UUID）</text>
+    <text x="60" y="330" fill="#57606a">免审批 → allowed/whitelist</text>
+    <text x="60" y="348" fill="#57606a">全程审计</text>
+    <rect x="266" y="288" width="200" height="74" rx="6" fill="#eef5ff" stroke="#b6d4fe"/>
+    <text x="278" y="310" fill="#24292f" font-weight="700">KeePass UI 弹窗</text>
+    <text x="278" y="330" fill="#57606a">允许 → allowed/popup</text>
+    <text x="278" y="348" fill="#57606a">拒绝 → approval_denied</text>
+    <rect x="484" y="288" width="200" height="74" rx="6" fill="#eef5ff" stroke="#b6d4fe"/>
+    <text x="496" y="310" fill="#24292f" font-weight="700">60s 超时</text>
+    <text x="496" y="330" fill="#57606a">自动拒绝 → approval_timeout</text>
+    <text x="496" y="348" fill="#57606a">不返回明文</text>
+    <rect x="702" y="288" width="172" height="74" rx="6" fill="#fff8dc" stroke="#e6d28a"/>
+    <text x="714" y="310" fill="#24292f" font-weight="700">dry-run 预览（P5）</text>
+    <text x="714" y="330" fill="#57606a">不弹窗、保护字段掩码</text>
+    <text x="714" y="348" fill="#57606a">note 提示执行时审批</text>
+  </g>
+
+  <!-- 掩码三层 -->
+  <rect x="30" y="402" width="860" height="134" rx="8" fill="#fff" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="48" y="428" font-size="15" font-weight="700" fill="#1f2328">掩码三层防御（读出口统一输出 [protected]）</text>
+  <g font-size="12.5">
+    <rect x="48" y="444" width="270" height="76" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <text x="62" y="468" fill="#24292f" font-weight="700">① Password 硬掩码</text>
+    <text x="62" y="488" fill="#57606a">KeePass 惯例字段，恒不可见</text>
+    <text x="62" y="506" fill="#57606a">不依赖 IsProtected 标志</text>
+    <rect x="333" y="444" width="270" height="76" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <text x="347" y="468" fill="#24292f" font-weight="700">② IsProtected 标志</text>
+    <text x="347" y="488" fill="#57606a">库内自定义保护字段</text>
+    <text x="347" y="506" fill="#57606a">按每个字段实时判定</text>
+    <rect x="618" y="444" width="256" height="76" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+    <text x="632" y="468" fill="#24292f" font-weight="700">③ extraMaskedFields 配置</text>
+    <text x="632" y="488" fill="#57606a">config.json 附加敏感字段清单</text>
+    <text x="632" y="506" fill="#57606a">配置 UI 可增删</text>
+  </g>
+</svg>
