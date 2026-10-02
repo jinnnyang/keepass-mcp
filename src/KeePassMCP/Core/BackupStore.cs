@@ -39,7 +39,8 @@ namespace KeePassMCP.Core
             foreach (string uuid in uuids.Distinct(StringComparer.OrdinalIgnoreCase))
             {
                 PwEntry e = FindEntryByUuid(db.RootGroup, uuid);
-                if (e != null) entries.Add(e);
+                // P6 保护规则③：配置条目不进写前快照
+                if (e != null && !LibraryConfig.IsConfigEntry(e)) entries.Add(e);
             }
             return Snapshot(db, tool, entries);
         }
@@ -77,7 +78,12 @@ namespace KeePassMCP.Core
         private static void CollectEntries(PwGroup group, List<PwEntry> sink)
         {
             if (group == null) return;
-            foreach (PwEntry e in group.Entries) sink.Add(e);
+            foreach (PwEntry e in group.Entries)
+            {
+                // P6 保护规则③：配置条目（KeePassMCP.*）从备份快照排除（token 永不落 backup/审计）
+                if (LibraryConfig.IsConfigEntry(e)) continue;
+                sink.Add(e);
+            }
             foreach (PwGroup g in group.Groups) CollectEntries(g, sink);
         }
 

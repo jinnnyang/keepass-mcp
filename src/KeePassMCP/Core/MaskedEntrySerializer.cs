@@ -15,6 +15,25 @@ namespace KeePassMCP.Core
     {
         public static EntryDto ToDto(PwEntry entry, ISet<string> extraMaskedFields)
         {
+            // P6 保护规则②：配置条目（KeePassMCP.*）整条目掩码（标题也掩，防识别）
+            if (LibraryConfig.IsConfigEntry(entry))
+            {
+                return new EntryDto
+                {
+                    uuid = entry.Uuid.ToHexString(),
+                    title = "[protected]",
+                    username = "",
+                    url = "",
+                    notes = "",
+                    tags = entry.Tags != null ? entry.Tags.ToList() : new List<string>(),
+                    group_path = BuildGroupPath(entry.ParentGroup),
+                    created = entry.CreationTime.ToString("o"),
+                    modified = entry.LastModificationTime.ToString("o"),
+                    custom_fields = new Dictionary<string, string>(),
+                    protected_field_names = new List<string> { "*" },
+                    protected_fields = new Dictionary<string, string>()
+                };
+            }
             var dto = new EntryDto
             {
                 uuid = entry.Uuid.ToHexString(),
@@ -55,6 +74,19 @@ namespace KeePassMCP.Core
 
         public static EntrySummaryDto ToSummary(PwEntry entry, ISet<string> extraMaskedFields)
         {
+            // P6 保护规则②：配置条目（KeePassMCP.*）整条目掩码（摘要层同理）
+            if (LibraryConfig.IsConfigEntry(entry))
+            {
+                return new EntrySummaryDto
+                {
+                    uuid = entry.Uuid.ToHexString(),
+                    title = "[protected]",
+                    username = "",
+                    tags = entry.Tags != null ? entry.Tags.ToList() : new List<string>(),
+                    group_path = BuildGroupPath(entry.ParentGroup),
+                    protected_field_names = new List<string> { "*" }
+                };
+            }
             var dto = new EntrySummaryDto
             {
                 uuid = entry.Uuid.ToHexString(),

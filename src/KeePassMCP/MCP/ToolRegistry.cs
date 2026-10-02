@@ -273,7 +273,8 @@ namespace KeePassMCP.MCP
                 // ---------- 密钥访问（白名单免审批；弹窗在 UI 线程） ----------
                 case "read_secret":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var rsE, out var rsDb) ? rsE :
-                        SecretHandlers.ReadSecret(rsDb, approval, PluginConfig.SecretWhitelist(),
+                        SecretHandlers.ReadSecret(rsDb, approval,
+                            LibraryConfig.MergeWhitelist(dbs, PluginConfig.SecretWhitelist()),
                             Str(args, "entry_uuid"), StrList(args, "fields")));
 
                 // ---------- 写（UI 线程 marshal） ----------
@@ -283,7 +284,8 @@ namespace KeePassMCP.MCP
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false));
                 case "update_entry_fields":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var ue, out var udb) ? ue :
-                        WriteHandlers.UpdateEntryFields(udb, approval, PluginConfig.SecretWhitelist(),
+                        WriteHandlers.UpdateEntryFields(udb, approval,
+                            LibraryConfig.MergeWhitelist(dbs, PluginConfig.SecretWhitelist()),
                             Str(args, "entry_uuid"), StrMap(args, "fields"),
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false, extraMasked));
                 case "move_entry":

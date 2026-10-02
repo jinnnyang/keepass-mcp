@@ -65,6 +65,11 @@ namespace KeePassMCP.Core
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
 
+            // P6 黑名单：命中 KeePassMCP-Blacklist 标签的条目拒绝写入（dry-run 同拒，语义一致）
+            if (LibraryConfig.CollectTaggedUuids(db, LibraryConfig.BlacklistTag)
+                    .Contains(entry.Uuid.ToHexString()))
+                return ToolHandlers.Err("blacklisted", $"条目 {entryUuid} 在黑名单中，拒绝写入");
+
             // 含保护字段 → 密钥访问审批（§6.6，P3 接入；白名单免审批 / 弹窗 60s）。
             // P5：dry-run 预览不触发审批（零副作用，不打扰用户）；预览中保护字段 old/new 均掩码，执行时才需审批。
             var protectedNames = fields.Keys.Where(f => IsProtectedFieldName(entry, f, extraMasked)).ToList();
@@ -167,6 +172,10 @@ namespace KeePassMCP.Core
             if (req != null) return req;
             if (string.IsNullOrWhiteSpace(title))
                 return ToolHandlers.Err("invalid_params", "title 不能为空");
+            // P6：KeePassMCP.* 前缀为插件配置条目保留（防 Agent 创建配置条目后读不回/误判）
+            if (title.StartsWith(LibraryConfig.ServerPrefix, StringComparison.OrdinalIgnoreCase))
+                return ToolHandlers.Err("reserved_title",
+                    $"标题前缀 {LibraryConfig.ServerPrefix} 为插件配置条目保留，请改用其他标题");
             PwGroup group = FindGroup(db, groupUuid);
             if (group == null) return ToolHandlers.Err("group_not_found", $"分组 {groupUuid} 未找到");
 

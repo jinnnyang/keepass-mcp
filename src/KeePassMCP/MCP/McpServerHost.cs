@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Text;
 using KeePass.Plugins;
+using KeePassLib;
 using KeePassMCP.Core;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -32,7 +33,13 @@ namespace KeePassMCP.MCP
         private int _port;
         private bool _running;
 
+        /// <summary>当前生效的 Bearer token（P6：库内 KeePassMCP.Server/CustomData.Token 优先，回退自动生成）。</summary>
+        private string _activeToken;
+
         public int Port => _port;
+
+        /// <summary>服务是否在监听（生命周期判定）。</summary>
+        public bool IsRunning => _running;
 
         public McpServerHost(IPluginHost host)
         {
@@ -41,9 +48,53 @@ namespace KeePassMCP.MCP
             LoadExtraMasked();
         }
 
+        /// <summary>解析生效 token：库内配置条目 CustomData.Token 优先，未找到回退自动生成（向后兼容）。</summary>
+        public string ResolveToken()
+        {
+            try
+            {
+                PwEntry server = LibraryConfig.FindServerEntry(_facade.GetDatabases(), out PwDatabase owner);
+                if (server != null)
+                {
+                    string custom = LibraryConfig.GetCustomToken(server);
+                    if (custom != null)
+                    {
+                        Log.Write($"MCP token 来自库内配置条目（{SafeDbName(owner)} / {server.Strings.ReadSafe("Title")}）");
+                        return custom;
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Write("ResolveToken 库内读取失败，回退自动生成: " + ex.Message); }
+            return AuthToken.GetOrCreate();
+        }
+
+        /// <summary>刷新 token（库事件触发：FileOpened 后重读库内配置）；变化时重写 connection.json。</summary>
+        public void RefreshToken()
+        {
+            string next = ResolveToken();
+            if (next != _activeToken)
+            {
+                _activeToken = next;
+                if (_running) WriteConnectionFile();
+                Log.Write("MCP token 已刷新");
+            }
+        }
+
+        /// <summary>是否有解锁库（服务生命周期：锁库即停）。</summary>
+        public bool HasUnlockedLibraries()
+        {
+            try { return LibraryConfig.HasUnlockedLibrary(_facade.GetDatabases()); }
+            catch { return false; }
+        }
+
+        private static string SafeDbName(PwDatabase db)
+        {
+            try { return db.Name ?? ""; } catch { return ""; }
+        }
+
         public void Start()
         {
-            AuthToken.GetOrCreate(); // 确保 token 就位
+            _activeToken = ResolveToken(); // 库内优先，回退自动生成
             _port = ReservePort();
             _listener = new HttpListener();
             _listener.Prefixes.Add($"http://127.0.0.1:{_port}/mcp/");
@@ -109,12 +160,12 @@ namespace KeePassMCP.MCP
                 return;
             }
 
-            // 3) Bearer token
+            // 3) Bearer token（恒定时间比较，防时序侧信道）
             string auth = ctx.Request.Headers["Authorization"];
             string provided = null;
             if (auth != null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
                 provided = auth.Substring(7).Trim();
-            if (!AuthToken.Verify(provided))
+            if (!VerifyToken(provided))
             {
                 ctx.Response.StatusCode = 401;
                 return; // 注意：WWW-Authenticate 是 HttpListener 受限响应头，不能直接赋值（会抛 ArgumentException）
@@ -333,6 +384,16 @@ namespace KeePassMCP.MCP
                 }
             });
 
+        /// <summary>恒定时间校验 Bearer token（对当前生效 _activeToken）。</summary>
+        private bool VerifyToken(string provided)
+        {
+            string expected = _activeToken;
+            if (expected == null || provided == null || provided.Length != expected.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < expected.Length; i++) diff |= provided[i] ^ expected[i];
+            return diff == 0;
+        }
+
         private static string BodyPreview(string body)
         {
             if (string.IsNullOrEmpty(body)) return "<empty>";
@@ -393,7 +454,7 @@ namespace KeePassMCP.MCP
                         ["url"] = $"http://127.0.0.1:{_port}/mcp",
                         ["headers"] = new Dictionary<string, object>
                         {
-                            ["Authorization"] = "Bearer " + AuthToken.GetOrCreate()
+                            ["Authorization"] = "Bearer " + (_activeToken ?? ResolveToken())
                         }
                     }
                 };

@@ -22,6 +22,14 @@ namespace KeePassMCP.Core
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
             string uuid = entry.Uuid.ToHexString();
 
+            // P6 保护规则①：KeePassMCP.* 配置条目禁止 read_secret（防 token 明文经审批进 Agent 上下文）
+            if (LibraryConfig.IsConfigEntry(entry))
+                return ToolHandlers.Err("token_entry_protected", "配置条目（KeePassMCP.*）禁止读取密钥");
+
+            // P6 黑名单：命中 KeePassMCP-Blacklist 标签的条目硬拒绝（优先级高于白名单）
+            if (LibraryConfig.CollectTaggedUuids(db, LibraryConfig.BlacklistTag).Contains(uuid))
+                return ToolHandlers.Err("blacklisted", $"条目 {uuid} 在黑名单中，拒绝读取");
+
             // 收集该条目的保护字段（Password 恒计入）
             var protectedFields = new List<string>();
             foreach (string key in entry.Strings.GetKeys())

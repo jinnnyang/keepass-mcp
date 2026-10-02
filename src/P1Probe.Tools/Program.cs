@@ -63,6 +63,7 @@ namespace P1Probe.Tools
                 RunP2WriteTests();
                 RunP3SecretTests();
                 RunP6CustomDataTests();
+                RunP6LibraryConfigTests();
             }
             catch (Exception ex)
             {
@@ -617,6 +618,105 @@ namespace P1Probe.Tools
             Check("p6 临时库已清理", !File.Exists(persistPath));
         }
 
+        // ---------- P6 库内配置数据层（LibraryConfig + 三条保护规则 + 黑白名单） ----------
+        private static void RunP6LibraryConfigTests()
+        {
+            Console.WriteLine("\n--- P6 库内配置数据层 ---");
+            var db = BuildP6ConfigDatabase();
+            var extra = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string apiUuid = GetEntryUuid(db, "GitHub API");
+            string mailUuid = GetEntryUuid(db, "Mailbox");
+            string serverUuid = GetEntryUuid(db, "KeePassMCP.Server");
+            var dbs = new List<PwDatabase> { db };
+
+            // ---- 1) 识别 ----
+            Check("p6 IsConfigEntry 配置条目 true", LibraryConfig.IsConfigEntry(FindEntry(db, serverUuid)));
+            Check("p6 IsConfigEntry 普通条目 false", !LibraryConfig.IsConfigEntry(FindEntry(db, apiUuid)));
+            Check("p6 IsServerTitle 精确", LibraryConfig.IsServerTitle("KeePassMCP.Server"));
+            Check("p6 IsServerTitle 多服务器后缀", LibraryConfig.IsServerTitle("KeePassMCP.Server.Work"));
+            Check("p6 IsServerTitle 其他 false", !LibraryConfig.IsServerTitle("KeePassMCP.Foo") && !LibraryConfig.IsServerTitle("normal"));
+
+            PwEntry foundServer = LibraryConfig.FindServerEntry(dbs, out PwDatabase ownerDb);
+            Check("p6 FindServerEntry 命中", foundServer != null && foundServer == FindEntry(db, serverUuid));
+            Check("p6 FindServerEntry owner 正确", ownerDb == db);
+            Check("p6 FindServerEntry 空库 null",
+                LibraryConfig.FindServerEntry(new List<PwDatabase> { BuildEmptyDatabase() }, out var od) == null);
+
+            // ---- 2) CustomData.Token 读取 ----
+            Check("p6 GetCustomToken 读回", LibraryConfig.GetCustomToken(FindEntry(db, serverUuid)) == "lib-token-xyz");
+            var noTokenEntry = FindEntry(db, apiUuid);
+            Check("p6 GetCustomToken 无 Token 返回 null", LibraryConfig.GetCustomToken(noTokenEntry) == null);
+
+            // ---- 3) 白/黑名单标签收集 + 并集 ----
+            var white = LibraryConfig.CollectTaggedUuids(db, LibraryConfig.WhitelistTag);
+            Check("p6 白名单标签含 GitHub API", white.Contains(apiUuid));
+            Check("p6 白名单标签不含 Mailbox", !white.Contains(mailUuid));
+            var black = LibraryConfig.CollectTaggedUuids(db, LibraryConfig.BlacklistTag);
+            Check("p6 黑名单标签含 Mailbox", black.Contains(mailUuid));
+            Check("p6 黑名单标签不含 GitHub API", !black.Contains(apiUuid));
+            var configWhite = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cfg-uuid-1" };
+            var merged = LibraryConfig.MergeWhitelist(dbs, configWhite);
+            Check("p6 MergeWhitelist = config ∪ 标签", merged.Contains("cfg-uuid-1") && merged.Contains(apiUuid) && !merged.Contains(mailUuid));
+
+            // ---- 4) 保护规则①：配置条目禁 read_secret ----
+            var approveDeny = new FakeApproval { Next = ApprovalOutcome.Denied };
+            var env = SecretHandlers.ReadSecret(db, approveDeny, new HashSet<string>(), serverUuid, null);
+            Check("p6 read_secret 配置条目 → token_entry_protected",
+                !Ok(env) && ErrCode(env) == "token_entry_protected");
+            Check("p6 read_secret 配置条目不弹窗", approveDeny.Requests.Count == 0);
+            string allAudit = File.ReadAllText(ConfigPaths.AuditFile);
+            Check("p6 审计无 lib-token 明文", !allAudit.Contains("lib-token-xyz"));
+
+            // ---- 5) 黑名单：read_secret 硬拒绝（白名单命中也不放行，优先级高于白名单） ----
+            var approveWhite = new FakeApproval { Next = ApprovalOutcome.Denied };
+            env = SecretHandlers.ReadSecret(db, approveWhite,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { mailUuid }, mailUuid, null);
+            Check("p6 read_secret 黑名单 → blacklisted", !Ok(env) && ErrCode(env) == "blacklisted");
+            Check("p6 read_secret 黑名单不弹窗", approveWhite.Requests.Count == 0);
+
+            // 白名单对照：GitHub API（标签命中）免审批返回明文
+            env = SecretHandlers.ReadSecret(db, approveDeny, LibraryConfig.MergeWhitelist(dbs, null), apiUuid, null);
+            Check("p6 read_secret 标签白名单免审批 ok", Ok(env));
+            var fields = (Dictionary<string, string>)((Dictionary<string, object>)env["data"])["fields"];
+            Check("p6 read_secret 标签白名单返回明文", fields != null && fields["Password"] == "super-secret-123");
+            Check("p6 read_secret 标签白名单不弹窗", approveDeny.Requests.Count == 0);
+
+            // ---- 6) 保护规则②：读出口整条目掩码 ----
+            string dtoJson = System.Text.Json.JsonSerializer.Serialize(MaskedEntrySerializer.ToDto(FindEntry(db, serverUuid), extra));
+            Check("p6 读出口配置条目 title 掩码", dtoJson.Contains("[protected]") && !dtoJson.Contains("KeePassMCP.Server"));
+            Check("p6 读出口配置条目无 CustomData 键值", !dtoJson.Contains("lib-token-xyz") && !dtoJson.Contains("Token"));
+            Check("p6 读出口配置条目 protected_field_names=[*]",
+                dtoJson.Contains("\"protected_field_names\":[\"*\"]") || dtoJson.Contains("\"protected_field_names\": [\"*\"]"));
+            var sumJson = System.Text.Json.JsonSerializer.Serialize(MaskedEntrySerializer.ToSummary(FindEntry(db, serverUuid), extra));
+            Check("p6 摘要层配置条目 title 掩码", sumJson.Contains("[protected]") && !sumJson.Contains("KeePassMCP.Server"));
+
+            // ---- 7) 保护规则③：备份排除配置条目 ----
+            string backupPath = BackupStore.SnapshotDatabase(db, "p6_backup");
+            string backupText = File.ReadAllText(backupPath);
+            Check("p6 备份文件存在", File.Exists(backupPath));
+            Check("p6 备份不含配置条目 uuid", !backupText.Contains(serverUuid));
+            Check("p6 备份含普通条目 uuid", backupText.Contains(apiUuid) || backupText.Contains(mailUuid));
+            Check("p6 备份无 lib-token 明文", !backupText.Contains("lib-token-xyz"));
+
+            // ---- 8) CreateEntry 保留标题 + UpdateEntryFields 黑名单 ----
+            env = WriteHandlers.CreateEntry(db, GetGroupUuid(db, "Work"), "KeePassMCP.Server", null, null, false, false);
+            Check("p6 create_entry 保留标题 → reserved_title", !Ok(env) && ErrCode(env) == "reserved_title");
+            env = WriteHandlers.CreateEntry(db, GetGroupUuid(db, "Work"), "KeePassMCP.Server", null, null, false, true);
+            Check("p6 create_entry 保留标题 dry-run 同拒", !Ok(env) && ErrCode(env) == "reserved_title");
+            env = WriteHandlers.CreateEntry(db, GetGroupUuid(db, "Work"), "KeePassMCP.Foo", null, null, false, false);
+            Check("p6 create_entry 前缀同拒", !Ok(env) && ErrCode(env) == "reserved_title");
+            env = WriteHandlers.CreateEntry(db, GetGroupUuid(db, "Work"), "Normal Title", null, null, false, false);
+            Check("p6 create_entry 普通标题 ok", Ok(env));
+
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, new HashSet<string>(), mailUuid,
+                new Dictionary<string, string> { ["URL"] = "https://x" }, false, false, extra);
+            Check("p6 update 黑名单 → blacklisted", !Ok(env) && ErrCode(env) == "blacklisted");
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, new HashSet<string>(), mailUuid,
+                new Dictionary<string, string> { ["URL"] = "https://x" }, false, true, extra);
+            Check("p6 update 黑名单 dry-run 同拒", !Ok(env) && ErrCode(env) == "blacklisted");
+            Check("p6 update 黑名单库无变化", FindEntry(db, mailUuid).Strings.ReadSafe("URL") == "");
+        }
+
         // ---------- P2 helpers ----------
         private static bool Ok(Dictionary<string, object> env) => (bool)env["ok"];
 
@@ -717,6 +817,23 @@ namespace P1Probe.Tools
         {
             PwGroup g = FindGroupByName(db, name);
             return g == null ? null : g.Uuid.ToHexString();
+        }
+
+        /// <summary>P6 测试库：基础库 + 配置条目（KeePassMCP.Server，Personal 组=验证任意分组）
+        /// + CustomData.Token + 白名单标签（GitHub API）+ 黑名单标签（Mailbox）。</summary>
+        private static PwDatabase BuildP6ConfigDatabase()
+        {
+            var db = BuildTestDatabase();
+            var personal = FindGroupByName(db, "Personal");
+
+            var server = new PwEntry(personal, true, true);
+            server.Strings.Set("Title", new ProtectedString(false, "KeePassMCP.Server"));
+            server.CustomData.Set("Token", "lib-token-xyz");
+            personal.AddEntry(server, true); // 必须显式 AddEntry（P2 教训）
+
+            FindEntry(db, GetEntryUuid(db, "GitHub API")).Tags.Add("KeePassMCP-Whitelist");
+            FindEntry(db, GetEntryUuid(db, "Mailbox")).Tags.Add("KeePassMCP-Blacklist");
+            return db;
         }
 
         private static string GetEntryUuid(PwDatabase db, string title)
