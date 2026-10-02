@@ -254,6 +254,19 @@ ping                              → {}
 - 所有审批事件（允许/拒绝/超时）写审计日志；审计与备份永不包含明文
 - 只读工具不触发审批（`get_entry`/资源仍输出 [protected]）
 
+### 6.7 库内配置条目（P6 设计，2026-10-02 可行性已确认、未实施）
+**动机**：消除外部 token 文件依赖（token 现存 `%APPDATA%\KeePassMCP\token`，独立于库）；token 随库加密存储、锁库即消失；客户端配置一个用户自管的静态字符串。
+**识别约定（不依赖路径，任意分组）**：
+- **值型配置 → 命名条目**：条目标题前缀 `KeePassMCP.`（大小写不敏感，库内任意位置）。token 条目 = `KeePassMCP.Token`，字段 `Token`（必须 Protect=True）。前缀为未来库内配置项留扩展位（如 `KeePassMCP.Config` 承载 confirm_writes/extraMaskedFields 覆盖）
+- **集合型配置 → 标签**：白名单 = 给目标条目打标签 `KeePassMCP-Whitelist`（免抄 UUID、KeePass UI 原生可视/筛选、防抄错）；**每库独立**（标签在哪个库只作用于该库，符合跨库隔离）
+- 参考先例：KPEntryTemplates（keepass.info 插件页）——库内条目承载配置/模板是 KeePass 生态成熟模式；其 Add Entry tab 为反射注入、KeePass 2.39 曾不兼容（版本脆弱），故 UI 分层处理（见 §13 P7/P8）
+**保护规则（铁律延伸）**：
+1. `KeePassMCP.*` 条目禁止 `read_secret`（错误码 `token_entry_protected`）——防 token 明文经审批进 Agent 上下文
+2. 所有读出口（get_entry/list_entries/search_entries/资源）对命中条目**整条目掩码**
+3. `backup_database` 与写前快照**排除**命中条目
+**行为**：库解锁后读取命中条目为 token（覆盖自动生成）；**锁库即服务停止监听**（token 随库锁消失）；多命中取第一个解锁库中条目，其余记警告日志；未找到 → 回退现状自动生成 token（向后兼容，config.json `secret_whitelist` 保留与标签取并集，是否废弃迁移待 P6 定）
+**UI 分层**：P6 数据层约定（零 UI 可用：手动建条目/打标签）→ P7 配置窗口增强（白名单页显示标签条目/一键打标签、token 页创建/显示条目）→ P8 Add Entry tab（KPEntryTemplates 式，先 P0 式探测 KeePass 2.60 EntryForm 扩展点可行性再定）
+
 ---
 
 ## 7. 审计与备份〔决策〕
@@ -383,3 +396,6 @@ P0–P3 逐项验证状态（2026-10-02 P3 完成）：
 4. **P3 密钥访问与打磨** ~~进行中~~ **已完成 2026-10-02**：`IApproval` 审批框架（`UiApprovalProvider` KeePass 主窗口弹窗 60s 超时自动拒绝 + `ApprovalForm` 显示库名/条目标题/字段名/操作类型；探针注入 `FakeApproval` 允许/拒绝/超时）+ 密钥访问白名单（config.json `secret_whitelist`，按条目 UUID，命中免审批全程审计）+ `read_secret`（白名单免审批返回明文一次；非白名单弹窗；拒绝码 approval_denied/approval_timeout；审计逐字段只记字段名 + 审批事件单独记录）+ `update_entry_fields` 保护字段审批接入（替换 P2 approval_required 拒绝）+ `restore_backup`（confirm 硬约束、两阶段先预览后应用、仅恢复非保护字段、保护字段不触碰、写审计）+ connection.json 启动写后验证重写 + 并发健壮性。逻辑探针 137/137（42 只读 + 57 写 + 38 P3 密钥）。KeePass 真实测试库集成验证：create_entry 真实写库、read_secret 白名单明文一次、**弹窗审批用户点"允许"→ allowed popup**、update 保护字段白名单审批、backup→update→restore 链路（URL 恢复/Password 不触碰）、审计/备份多次 grep 无明文、10 并发 initialize 全过、18 工具注册。**P3 期间发现**：`PwDatabase.Save(IStatusLogger)`（New 后 Save(null) 落盘）；KeePass 命令行开库用位置参数 `KeePass.exe "path" -pw:pass`（`--open:` 在单实例下不可靠）；approval 弹窗在真实桌面弹出（computer_use 隔离会话不可见，需用户本人点）。测试痕迹已清理（临时库/审计/备份删除、config 复位）。**P4 待做**：插件选项页（白名单/敏感字段/开关可视化配置）、多库同时打开路由真实验证、approval 弹窗打磨（倒计时显示/拒绝原因）、`dry_run` 弹窗审批提示优化
 5. **P4 配置 UI 与打磨** ~~进行中~~ **已完成 2026-10-02**：`UI/ConfigForm.cs` 配置窗口（菜单 **工具 → KeePassMCP 配置...**，`Plugin.GetMenuItem(PluginMenuType.Main)` 接入；白名单 ListBox 添加/删除 + UUID 格式校验〔32 hex，可含连字符〕、附加敏感字段同、`confirm_writes` CheckBox；保存写回 config.json〔保留现有值合并〕）；`McpServerHost.Facade` 暴露供窗口 owner；`ApprovalForm` 倒计时打磨（每秒刷新剩余秒数 Label，最后 10 秒红字加粗提示，超时自动拒绝不变）。逻辑探针 137/137 回归全绿（P4 改动不影响既有断言）。**多库路由真实集成验证**：双测试库（探针 `--create-db` 建 kp-ma/kp-mb，KeePass 位置参数 + `-pw:` 打开——注意 `-pw:` 只解锁首个库，第二个库需单实例转发 `Start-Process KeePass.exe <path> -pw:<pw>` 补开）→ `list_databases` 返回 2 库且 entry_count 各自正确；两库各 create_entry 成功；**同一 UUID 跨库查询 → entry_not_found（路由隔离正确）**；各自 get_entry 正常。测试痕迹已清理（临时库/审计/备份删除）。**P5 待做**：真实库锁定态人工确认、`dry_run` 弹窗审批提示优化、approval 弹窗自动化端到端（若未来有 GUI 自动化环境）
 6. **P5 收尾打磨** ~~进行中~~ **已完成 2026-10-02**：**`update_entry_fields` dry-run 审批语义修复**（P2/P3 遗留 bug：dry-run 含保护字段也弹窗、且预览 changes 泄露保护字段 old/new 明文）→ dry-run 不再触发审批弹窗（零副作用、不打扰用户）；预览中保护字段 old/new 一律掩码 `[protected]`；响应加 `note` 提示"执行时将弹窗审批（白名单条目免审批）"。逻辑探针新增 6 断言 → **143/143 全绿**；真实测试库集成验证：dry-run 54ms 立即返回（不弹窗）、预览掩码、note 存在；执行路径（白名单）更新成功；审计无 dry-preview-pw/p5-exec-pw 明文、approval allowed whitelist 记录。测试痕迹已清理。**剩余人工确认项**：KeePass 真实锁定态后请求拒绝（探针已逻辑覆盖）、写操作 UI 可见变化目视、配置窗口/弹窗倒计时目视（P4/P5 UI 改动）
+7. **P6 库内配置条目（数据层约定，待实施）**：设计定稿见 §6.7——token 命名条目 `KeePassMCP.Token`（字段 Token、Protect=True、任意分组）+ 白名单标签 `KeePassMCP-Whitelist`（每库独立）+ 三条保护规则（禁 read_secret/读出口整条目掩码/备份排除）+ 锁库即服务停 + 未找到回退自动生成（向后兼容）。实施点：插件启动/解锁事件读取命中条目；服务生命周期改由"库解锁"驱动；config.json 白名单并集/迁移决策；探针扩展
+8. **P7 UI 增强（待实施）**：配置窗口加"白名单"页（显示库内带标签条目、一键给选中条目打标签）与"token"页（显示/创建 `KeePassMCP.Token`）；复用现有 ConfigForm
+9. **P8 Add Entry tab（探测后定）**：KPEntryTemplates 式表单 tab（Init As Token / Mark Whitelisted）；先 P0 式探测 KeePass 2.60 EntryForm 扩展点可行性（其反射注入在 2.39 曾不兼容），稳了再实施
