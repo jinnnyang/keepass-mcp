@@ -35,6 +35,84 @@ flowchart LR
 - 写（元数据）：`rename_entry` / `update_entry_fields` / `move_entry` / `create_group` / `rename_group` / `delete_group` / `add_tag` / `remove_tag` / `create_entry` / `backup_database`
 - 资源：`keepass://groups`、`keepass://entries/{uuid}`、`keepass://audit` 等
 
+## 安装
+
+**环境要求**：Windows + KeePass 2.x（本机验证版本 2.60.0）+ .NET Framework 4.8（系统自带）。
+
+1. **获取插件**：源码构建（`dotnet build src\KeePassMCP.sln`）或使用发布包（未来打成的 `.plgx` 单文件，见 docs/HANDOFF.md §9.10）。
+2. **部署**（目录形态）：
+   - 在 KeePass 的 `Plugins\` 下建子目录 `KeePassMCP\`；
+   - 把 `KeePassMCP.dll` **和依赖** `Newtonsoft.Json.dll` 一起放入该子目录（依赖必须与插件同目录，缺依赖会弹"未能加载文件或程序集"）；
+   - 重启 KeePass。
+   - 若为 `.plgx` 单文件：直接放入 `Plugins\` 根目录即可（内含依赖）。
+3. **验证已加载**：
+   - 菜单 **工具 → KeePassMCP 配置...** 出现 → 插件已加载；
+   - 或查看 `%APPDATA%\KeePassMCP\keepassmcp.log` 出现 `KeePassMCP initialized`；
+   - 或确认 `%APPDATA%\KeePassMCP\connection.json` 已生成（内含本机端口与 token）。
+
+> 注意：升级/替换 DLL 前**必须先关闭 KeePass**——运行中的 KeePass 会锁住插件 DLL，复制可能"看起来成功"实际未生效。
+
+## 配置
+
+配置文件 `%APPDATA%\KeePassMCP\config.json`（可用环境变量 `KeePassMCP_DATA_DIR` 覆盖数据目录），也可用菜单 **工具 → KeePassMCP 配置...** 可视化编辑：
+
+| 键 | 类型 | 说明 |
+|---|---|---|
+| `secret_whitelist` | string[] | 密钥访问白名单：条目 UUID 数组；命中条目对 `read_secret` / 保护字段更新**免审批**，全程审计 |
+| `extraMaskedFields` | string[] | 附加敏感字段名：这些字段在掩码第一层（Password 硬掩码）与第二层（IsProtected 标志）之外再强制掩码 |
+| `confirm_writes` | bool | 全局"写需确认"开关：`true` 时所有写工具需传 `confirm:true` 才执行 |
+
+- 条目 UUID 获取：调用 `get_entry` 响应中的 `uuid` 字段，或 `read_secret`/`update` 的审计记录。
+- 白名单 UUID 格式：32 位十六进制（可含连字符，配置 UI 会自动归一化）。
+
+## 连接与快速验证
+
+插件启动后自动生成 `%APPDATA%\KeePassMCP\connection.json`（每次启动写后自校验端口），内容形如：
+
+```json
+{
+  "port": 53029,
+  "url": "http://127.0.0.1:53029/mcp",
+  "mcp_client": {
+    "type": "http",
+    "url": "http://127.0.0.1:53029/mcp",
+    "headers": { "Authorization": "Bearer <token>" }
+  }
+}
+```
+
+标准 MCP 客户端（moirai 等）按 `mcp_client` 段配置即可（Streamable HTTP + Bearer token，仅 127.0.0.1 回环）。
+
+命令行快速验证（PowerShell）：
+
+```powershell
+$c = Get-Content "$env:APPDATA\KeePassMCP\connection.json" -Raw
+$port = [regex]::Match($c, '"port":\s*(\d+)').Groups[1].Value
+$tok  = [regex]::Match($c, '"Authorization":\s*"Bearer\s+(\w+)"').Groups[1].Value
+
+# 1) 协议握手
+curl.exe -X POST "http://127.0.0.1:$port/mcp" -H "Authorization: Bearer $tok" `
+  -H "Content-Type: application/json" `
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}'
+
+# 2) 工具清单
+curl.exe -X POST "http://127.0.0.1:$port/mcp" -H "Authorization: Bearer $tok" `
+  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+
+# 3) 已打开库（需 KeePass 已开库并解锁）
+curl.exe -X POST "http://127.0.0.1:$port/mcp" -H "Authorization: Bearer $tok" `
+  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_databases","arguments":{}}}'
+```
+
+## 安全使用须知
+
+- **掩码**：`Password` 恒输出 `[protected]`；库内 `Protect="True"` 字段与配置 `extraMaskedFields` 同样掩码；`UserName` 默认可见。任何读出口、审计、备份不含明文。
+- **审批**：`read_secret`（读取明文一次）/ `update_entry_fields`（含保护字段）——白名单条目免审批；否则 KeePass 弹窗（显示库名/条目标题/字段名），60s 超时自动拒绝，拒绝/超时返回 `approval_denied` / `approval_timeout` 且无明文。
+- **dry-run**：所有写工具支持 `dry_run=true` 预览（零副作用：不落库/不备份/不审计）；含保护字段的预览一律掩码。
+- **审计与备份**：写执行、密钥访问（只记字段名）、审批事件全部记入 `audit.jsonl`；写前自动备份到 `backups\`（仅非保护字段）；`restore_backup` 可回滚非保护字段（保护字段不触碰）。
+- **锁定联动**：KeePass 锁定库后，该库一切请求返回 `database_locked`。
+- **明文唯一出口**：审批通过的 `read_secret` 响应一次；如需将密钥写回 Agent，建议优先 `create_entry` 的 `generate_password`（插件内生成，明文不经 Agent 上下文）。
+
 ## 目录
 
 ```
