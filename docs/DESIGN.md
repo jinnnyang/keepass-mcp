@@ -208,11 +208,11 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P4 打磨与配置 UI）
+## 12. 下一步（P5 收尾打磨）
 
-**P3 密钥访问与打磨已完成（2026-10-02）**：IApproval 审批框架（KeePass 主窗口弹窗 60s 超时自动拒绝）+ 密钥访问白名单（config.json `secret_whitelist`）+ read_secret（白名单免审批 / 弹窗审批 / 明文仅一次返回 / 审计逐字段 + 审批事件）+ update_entry_fields 保护字段审批接入 + restore_backup（仅恢复非保护字段）+ connection.json 启动写后验证 + 并发健壮性。逻辑探针 137/137；**真实测试库集成验证全绿**（create_entry 写库、白名单明文一次、弹窗审批用户点"允许"、backup→update→restore 链路、审计/备份无明文 grep、10 并发 initialize）。18 工具注册。测试痕迹已清理。
+**P4 配置 UI 与打磨已完成（2026-10-02）**：插件菜单 **工具 → KeePassMCP 配置...**（`Plugin.GetMenuItem`）打开配置窗口——白名单/附加敏感字段 ListBox 编辑（UUID 格式校验）+ `confirm_writes` 开关，保存写回 config.json；`ApprovalForm` 倒计时打磨（剩余秒数每秒刷新、最后 10s 红字）。**多库路由真实集成验证通过**：双测试库同时打开，list_databases 返回 2 库、两库各自 create_entry、同一 UUID 跨库查询 entry_not_found（隔离正确）。逻辑探针 137/137 回归全绿。测试痕迹已清理。
 
-进入 **P4**（按 HANDOFF §13）：
-1. 插件选项页：白名单/附加敏感字段/全局确认开关可视化配置
-2. 多库同时打开路由真实验证；approval 弹窗打磨（倒计时显示、拒绝原因）
-3. HANDOFF §10 剩余人工确认项（写操作 UI 可见变化）
+进入 **P5**（按 HANDOFF §13）：
+1. `dry_run` 弹窗审批提示优化（预览时避免触发审批弹窗误导）
+2. 真实库锁定态人工确认、写操作 UI 可见变化人工确认
+3. 可选的 GUI 自动化端到端（future）

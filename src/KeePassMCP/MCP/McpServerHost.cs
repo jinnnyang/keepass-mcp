@@ -25,6 +25,9 @@ namespace KeePassMCP.MCP
         private readonly IApproval _approval;
         private readonly ISet<string> _extraMasked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>宿主门面（菜单项打开配置窗口时作 owner）。</summary>
+        public KeePassFacade Facade => _facade;
+
         private HttpListener _listener;
         private int _port;
         private bool _running;

@@ -62,20 +62,26 @@ namespace KeePassMCP.Core
         }
     }
 
-    /// <summary>审批弹窗：显示库名/条目标题/字段名/操作类型，允许/拒绝按钮，超时自动拒绝。</summary>
+    /// <summary>审批弹窗：显示库名/条目标题/字段名/操作类型，允许/拒绝按钮，超时自动拒绝（含倒计时提示）。</summary>
     public sealed class ApprovalForm : Form
     {
         public ApprovalOutcome Outcome { get; private set; } = ApprovalOutcome.Denied;
+        private readonly TimeSpan _timeout;
+        private readonly Label _countdown;
+        private System.Windows.Forms.Timer _tickTimer;
+        private System.Windows.Forms.Timer _timeoutTimer;
+        private DateTime _started;
 
         public ApprovalForm(ApprovalRequest request, TimeSpan timeout)
         {
+            _timeout = timeout;
             Outcome = ApprovalOutcome.Denied;
             Text = "KeePassMCP 密钥访问审批";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(460, 200);
+            ClientSize = new Size(460, 230);
 
             var sb = new StringBuilder();
             sb.AppendLine("Agent 请求访问受保护字段明文：");
@@ -94,26 +100,53 @@ namespace KeePassMCP.Core
                 AutoSize = false,
                 TextAlign = ContentAlignment.TopLeft
             };
-            var btnAllow = new Button { Text = "允许", Location = new Point(260, 124), Size = new Size(88, 32) };
+            _countdown = new Label
+            {
+                Text = "剩余 " + (int)timeout.TotalSeconds + " 秒，超时自动拒绝",
+                Location = new Point(16, 156),
+                Size = new Size(250, 22),
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.Gray
+            };
+            var btnAllow = new Button { Text = "允许", Location = new Point(260, 148), Size = new Size(88, 32) };
             btnAllow.Click += (s, e) => { Outcome = ApprovalOutcome.Allowed; DialogResult = DialogResult.Yes; };
-            var btnDeny = new Button { Text = "拒绝", Location = new Point(356, 124), Size = new Size(88, 32) };
+            var btnDeny = new Button { Text = "拒绝", Location = new Point(356, 148), Size = new Size(88, 32) };
             btnDeny.Click += (s, e) => { Outcome = ApprovalOutcome.Denied; DialogResult = DialogResult.No; };
             Controls.Add(lbl);
+            Controls.Add(_countdown);
             Controls.Add(btnAllow);
             Controls.Add(btnDeny);
             AcceptButton = btnAllow;
             CancelButton = btnDeny;
 
-            // 60s 超时自动拒绝（HANDOFF §6.6：默认 60s 超时按拒绝）
-            var timer = new Timer { Interval = (int)timeout.TotalMilliseconds };
-            timer.Tick += (s, e) =>
+            // 倒计时（每秒刷新）；60s 超时自动拒绝（HANDOFF §6.6：默认 60s 超时按拒绝）
+            _started = DateTime.UtcNow;
+            _tickTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _tickTimer.Tick += (s, e) => UpdateCountdown();
+            _tickTimer.Start();
+            _timeoutTimer = new System.Windows.Forms.Timer { Interval = (int)timeout.TotalMilliseconds };
+            _timeoutTimer.Tick += (s, e) =>
             {
-                timer.Stop();
+                _timeoutTimer.Stop();
+                _tickTimer.Stop();
                 Outcome = ApprovalOutcome.TimedOut;
                 DialogResult = DialogResult.No;
             };
-            timer.Start();
-            FormClosed += (s, e) => timer.Stop();
+            _timeoutTimer.Start();
+            FormClosed += (s, e) => { _tickTimer.Stop(); _timeoutTimer.Stop(); };
+        }
+
+        private void UpdateCountdown()
+        {
+            var remain = (int)Math.Ceiling(_timeout.TotalSeconds - (DateTime.UtcNow - _started).TotalSeconds);
+            if (remain < 0) remain = 0;
+            _countdown.Text = "剩余 " + remain + " 秒，超时自动拒绝";
+            if (remain <= 10)
+            {
+                _countdown.ForeColor = Color.Firebrick;
+                _countdown.Font = new Font(_countdown.Font, FontStyle.Bold);
+            }
         }
     }
 }
