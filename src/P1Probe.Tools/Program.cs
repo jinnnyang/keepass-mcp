@@ -62,6 +62,7 @@ namespace P1Probe.Tools
                 RunErrorPaths(dbs);
                 RunP2WriteTests();
                 RunP3SecretTests();
+                RunP6CustomDataTests();
             }
             catch (Exception ex)
             {
@@ -552,6 +553,68 @@ namespace P1Probe.Tools
                     backupsClean3 = false;
             }
             Check("p3 备份全文无明文", backupsClean3);
+        }
+
+        // ---------- P6 库内配置：CustomData 实测 ----------
+        private static void RunP6CustomDataTests()
+        {
+            Console.WriteLine("\n--- P6 CustomData 实测 ---");
+            var db = BuildTestDatabase();
+            var extra = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string apiUuid = GetEntryUuid(db, "GitHub API");
+            var entry = FindEntry(db, apiUuid);
+            const string tokenKey = "KeePassMCP_Token";
+            const string tokenVal = "p6-token-abc123";
+
+            // ---- 1) API 可用性：写 / 读 / 改 / 删（StringDictionaryEx: Get/Set/Exists/Remove） ----
+            Check("p6 CustomData 属性可访问", entry.CustomData != null);
+            entry.CustomData.Set(tokenKey, tokenVal);
+            Check("p6 CustomData 写入后读回", entry.CustomData.Exists(tokenKey) && entry.CustomData.Get(tokenKey) == tokenVal);
+            entry.CustomData.Set(tokenKey, "p6-token-xyz789");
+            Check("p6 CustomData 覆盖写", entry.CustomData.Get(tokenKey) == "p6-token-xyz789");
+            Check("p6 CustomData Remove 返回 true", entry.CustomData.Remove(tokenKey));
+            Check("p6 CustomData 删除后不存在", !entry.CustomData.Exists(tokenKey));
+            entry.CustomData.Set(tokenKey, tokenVal); // 复原
+
+            // ---- 2) 不可见性：CustomData 键不进入 Strings 字段列表 ----
+            var stringKeys = entry.Strings.GetKeys().ToList();
+            Check("p6 CustomData 不进字段列表", !stringKeys.Any(k => string.Equals(k, tokenKey, StringComparison.OrdinalIgnoreCase)));
+
+            // ---- 3) 读出口不泄露：MaskedEntrySerializer 不含 token 值/键名 ----
+            string dtoJson = System.Text.Json.JsonSerializer.Serialize(MaskedEntrySerializer.ToDto(entry, extra));
+            Check("p6 读出口无 token 明文", !dtoJson.Contains(tokenVal));
+            Check("p6 读出口无 token 键名", !dtoJson.Contains(tokenKey));
+            // 对照：Tags 仍在读出口（白/黑名单标签可被插件读取）
+            Check("p6 读出口含 tags", dtoJson.Contains("dev") && dtoJson.Contains("github"));
+
+            // ---- 4) 持久性：保存（Save(null) 到库自身路径）→ 重开 → 读回 ----
+            string persistPath = Path.Combine(Path.GetTempPath(), "kp-p6-customdata-" + Guid.NewGuid().ToString("N") + ".kdbx");
+            var key = new CompositeKey();
+            key.AddUserKey(new KcpPassword("test-master"));
+            var dbP = new PwDatabase();
+            dbP.New(new IOConnectionInfo { Path = persistPath }, key);
+            var g = new PwGroup(true, true, "G", PwIcon.Folder);
+            dbP.RootGroup.AddGroup(g, true);
+            var e = new PwEntry(g, true, true);
+            e.Strings.Set("Title", new ProtectedString(false, "T"));
+            e.CustomData.Set(tokenKey, tokenVal);
+            g.AddEntry(e, true); // 必须显式 AddEntry（new PwEntry(g,...) 构造器不加入组树，P2 教训）
+            string persistUuid = e.Uuid.ToHexString();
+            dbP.Save(null); // 单参 Save(IStatusLogger)，保存到 New 设置的 IOConnectionInfo
+            var db2 = new PwDatabase();
+            try { db2.Open(new IOConnectionInfo { Path = persistPath }, key, null); }
+            catch (Exception openEx) { Console.WriteLine("P6DIAG Open 异常: " + openEx); }
+            Check("p6 重开成功且文件非空", db2.IsOpen && new FileInfo(persistPath).Length > 0);
+            var e2 = FindEntry(db2, persistUuid); // FindEntry 按 UUID 查找
+            Check("p6 重开后条目存在", e2 != null);
+            Check("p6 重开后 CustomData 持久", e2 != null && e2.CustomData.Exists(tokenKey) && e2.CustomData.Get(tokenKey) == tokenVal);
+            Check("p6 重开后 CustomData 仍在字段外", e2 != null
+                && !e2.Strings.GetKeys().Any(k => string.Equals(k, tokenKey, StringComparison.OrdinalIgnoreCase)));
+            // 清理：关闭并删除临时库
+            if (e2 != null) { e2.CustomData.Remove(tokenKey); db2.Save(null); }
+            dbP.Close(); db2.Close();
+            File.Delete(persistPath);
+            Check("p6 临时库已清理", !File.Exists(persistPath));
         }
 
         // ---------- P2 helpers ----------
