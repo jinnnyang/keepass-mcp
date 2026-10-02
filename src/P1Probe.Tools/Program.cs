@@ -25,8 +25,23 @@ namespace P1Probe.Tools
 
         private const string DbId = @"C:\test\probe.kdbx";
 
-        private static void Main()
+        private static void Main(string[] args)
         {
+            // 辅助模式：用 KeePassLib 创建真实 kdbx 文件（集成测试开真实库用）
+            if (args.Length >= 2 && args[0] == "--create-db")
+            {
+                string path = args[1];
+                string pw = args.Length >= 3 ? args[2] : "kp-it4-pass-2026";
+                var db = new PwDatabase();
+                var key = new CompositeKey();
+                key.AddUserKey(new KcpPassword(pw));
+                db.New(new IOConnectionInfo { Path = path }, key);
+                db.Name = "IT4 Probe DB";
+                db.Save(null); // 保存到 New 时设置的 IOConnectionInfo（2.60 Save(IStatusLogger)）
+                Console.WriteLine("created " + path);
+                return;
+            }
+
             // P2 探针隔离：审计/备份/配置写临时目录
             string probeDataDir = Path.Combine(Path.GetTempPath(), "kp-probe-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(probeDataDir);
@@ -46,6 +61,7 @@ namespace P1Probe.Tools
                 RunExtraMasked(dbs);
                 RunErrorPaths(dbs);
                 RunP2WriteTests();
+                RunP3SecretTests();
             }
             catch (Exception ex)
             {
@@ -260,26 +276,28 @@ namespace P1Probe.Tools
             Check("p2 rename 执行审计 +1", FileCount(ConfigPaths.AuditFile) == auditBase + 1);
             Check("p2 rename 执行备份 +1", DirectoryCount(ConfigPaths.BackupsDir) == backupBase + 1);
 
-            // ---- 3) update_entry_fields ----
-            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+            // ---- 3) update_entry_fields（保护字段 → 审批，P3 语义） ----
+            var approveDeny = new FakeApproval { Next = ApprovalOutcome.Denied };
+            var whiteNone = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, whiteNone, apiUuid,
                 new Dictionary<string, string> { ["URL"] = "https://github.com/octocat" }, false, false, extra);
             Check("p2 update URL ok", Ok(env));
             Check("p2 update URL 生效", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://github.com/octocat");
 
-            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, whiteNone, apiUuid,
                 new Dictionary<string, string> { ["Password"] = "x" }, false, false, extra);
-            Check("p2 update Password → approval_required",
-                !Ok(env) && ErrCode(env) == "approval_required");
+            Check("p2 update Password 拒绝 → approval_denied",
+                !Ok(env) && ErrCode(env) == "approval_denied");
             Check("p2 update Password 库无变化", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "super-secret-123");
 
-            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, whiteNone, apiUuid,
                 new Dictionary<string, string>(), false, false, extra);
             Check("p2 update 空 fields → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
 
             var extraSecret = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Secret" };
-            env = WriteHandlers.UpdateEntryFields(db, apiUuid,
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, whiteNone, apiUuid,
                 new Dictionary<string, string> { ["Secret"] = "x" }, false, false, extraSecret);
-            Check("p2 update 附加清单字段 → approval_required", !Ok(env) && ErrCode(env) == "approval_required");
+            Check("p2 update 附加清单字段拒绝 → approval_denied", !Ok(env) && ErrCode(env) == "approval_denied");
 
             // ---- 4) move_entry ----
             env = WriteHandlers.MoveEntry(db, apiUuid, personalUuid, false, false);
@@ -397,6 +415,127 @@ namespace P1Probe.Tools
             Check("p2 备份全文无明文", backupsClean);
         }
 
+        // ---------- P3 密钥访问（read_secret + 审批 + restore_backup） ----------
+        private static void RunP3SecretTests()
+        {
+            Console.WriteLine("\n--- P3 密钥访问 ---");
+            var db = BuildTestDatabase();
+            var dbs = new List<PwDatabase> { db };
+            var extra = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string apiUuid = GetEntryUuid(db, "GitHub API");
+
+            // ---- 1) read_secret：白名单免审批返回明文一次 ----
+            var white = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { apiUuid };
+            var approve = new FakeApproval { Next = ApprovalOutcome.Denied }; // 白名单命中不应调用弹窗
+            var env = SecretHandlers.ReadSecret(db, approve, white, apiUuid, null);
+            Check("p3 read_secret 白名单 ok", Ok(env));
+            var fields = (Dictionary<string, string>)((Dictionary<string, object>)env["data"])["fields"];
+            Check("p3 read_secret 返回 Password 明文一次",
+                fields != null && fields.ContainsKey("Password") && fields["Password"] == "super-secret-123");
+            Check("p3 read_secret 白名单不弹窗", approve.Requests.Count == 0);
+            string allAudit = File.ReadAllText(ConfigPaths.AuditFile);
+            Check("p3 read_secret 审计含 approval allowed whitelist",
+                allAudit.Contains("\"approval\"") && allAudit.Contains("allowed") && allAudit.Contains("whitelist"));
+            Check("p3 read_secret 审计含 read_secret 记录", allAudit.Contains("\"read_secret\""));
+            Check("p3 审计无明文", !allAudit.Contains("super-secret-123"));
+
+            // ---- 2) read_secret：非白名单弹窗拒绝 / 超时 ----
+            var approveDeny = new FakeApproval { Next = ApprovalOutcome.Denied };
+            env = SecretHandlers.ReadSecret(db, approveDeny, new HashSet<string>(), apiUuid, null);
+            Check("p3 read_secret 拒绝 → approval_denied", !Ok(env) && ErrCode(env) == "approval_denied");
+            Check("p3 read_secret 拒绝弹窗 1 次", approveDeny.Requests.Count == 1);
+            Check("p3 read_secret 弹窗含库名", approveDeny.Requests[0].DatabaseName == "Probe DB");
+            Check("p3 read_secret 弹窗含条目标题", approveDeny.Requests[0].EntryTitle == "GitHub API");
+            Check("p3 read_secret 弹窗含操作", approveDeny.Requests[0].Operation == "read_secret");
+            Check("p3 read_secret 弹窗含字段名", approveDeny.Requests[0].Fields.Contains("Password"));
+
+            var approveTimeout = new FakeApproval { Next = ApprovalOutcome.TimedOut };
+            env = SecretHandlers.ReadSecret(db, approveTimeout, new HashSet<string>(), apiUuid, null);
+            Check("p3 read_secret 超时 → approval_timeout", !Ok(env) && ErrCode(env) == "approval_timeout");
+
+            // ---- 3) read_secret：指定字段 / 校验 ----
+            var approveAllow = new FakeApproval { Next = ApprovalOutcome.Allowed };
+            env = SecretHandlers.ReadSecret(db, approveAllow, new HashSet<string>(), apiUuid,
+                new List<string> { "Password", "APIKey" });
+            Check("p3 read_secret 指定字段 ok", Ok(env));
+            var f2 = (Dictionary<string, string>)((Dictionary<string, object>)env["data"])["fields"];
+            Check("p3 read_secret 指定字段含 APIKey", f2 != null && f2.ContainsKey("APIKey") && f2["APIKey"] == "ghp_abc123");
+
+            env = SecretHandlers.ReadSecret(db, approveAllow, new HashSet<string>(), apiUuid,
+                new List<string> { "UserName" });
+            Check("p3 read_secret 非保护字段 → invalid_params", !Ok(env) && ErrCode(env) == "invalid_params");
+
+            env = SecretHandlers.ReadSecret(db, approveAllow, new HashSet<string>(),
+                Guid.NewGuid().ToString("N"), null);
+            Check("p3 read_secret 条目不存在 → entry_not_found", !Ok(env) && ErrCode(env) == "entry_not_found");
+
+            // ---- 4) update_entry_fields：保护字段审批 ----
+            string beforePw = FindEntry(db, apiUuid).Strings.ReadSafe("Password");
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, new HashSet<string>(), apiUuid,
+                new Dictionary<string, string> { ["Password"] = "new-pw-000" }, false, false, extra);
+            Check("p3 update 保护字段拒绝 → approval_denied", !Ok(env) && ErrCode(env) == "approval_denied");
+            Check("p3 update 拒绝库无变化", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == beforePw);
+
+            env = WriteHandlers.UpdateEntryFields(db, approveAllow, new HashSet<string>(), apiUuid,
+                new Dictionary<string, string> { ["Password"] = "new-pw-000" }, false, false, extra);
+            Check("p3 update 保护字段审批通过 ok", Ok(env));
+            Check("p3 update 审批通过生效", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "new-pw-000");
+            Check("p3 update 审批通过仍 protected", FindEntry(db, apiUuid).Strings.Get("Password").IsProtected);
+
+            var approveWhite = new FakeApproval { Next = ApprovalOutcome.Denied };
+            env = WriteHandlers.UpdateEntryFields(db, approveWhite, white, apiUuid,
+                new Dictionary<string, string> { ["Password"] = "new-pw-111" }, false, false, extra);
+            Check("p3 update 白名单免审批", Ok(env) && FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "new-pw-111");
+            Check("p3 update 白名单不弹窗", approveWhite.Requests.Count == 0);
+
+            var extraSecret = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Secret" };
+            env = WriteHandlers.UpdateEntryFields(db, approveDeny, new HashSet<string>(), apiUuid,
+                new Dictionary<string, string> { ["Secret"] = "x" }, false, false, extraSecret);
+            Check("p3 update 附加清单字段拒绝 → approval_denied", !Ok(env) && ErrCode(env) == "approval_denied");
+
+            // ---- 5) restore_backup ----
+            env = WriteHandlers.BackupDatabase(db);
+            Check("p3 backup ok", Ok(env));
+            string backupId = (string)((Dictionary<string, object>)env["data"])["backup_id"];
+
+            // 备份后改动非保护 + 保护字段
+            env = WriteHandlers.UpdateEntryFields(db, approveAllow, new HashSet<string>(), apiUuid,
+                new Dictionary<string, string> { ["URL"] = "https://changed.example", ["Password"] = "post-backup-pw" },
+                false, false, extra);
+            Check("p3 restore 前置：URL 已改", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://changed.example");
+            Check("p3 restore 前置：Password 已改", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "post-backup-pw");
+
+            env = WriteHandlers.RestoreBackup(db, backupId, false, false, extra);
+            Check("p3 restore 无 confirm → confirmation_required", !Ok(env) && ErrCode(env) == "confirmation_required");
+
+            env = WriteHandlers.RestoreBackup(db, backupId, true, true, extra);
+            Check("p3 restore dry-run ok", Ok(env) && Json(env).GetProperty("data").GetProperty("dry_run").GetBoolean());
+            Check("p3 restore dry-run 不改库", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://changed.example");
+
+            env = WriteHandlers.RestoreBackup(db, backupId, true, false, extra);
+            Check("p3 restore 执行 ok", Ok(env) && Json(env).GetProperty("data").GetProperty("executed").GetBoolean());
+            Check("p3 restore URL 恢复非保护字段", FindEntry(db, apiUuid).Strings.ReadSafe("URL") == "https://github.com");
+            Check("p3 restore Password 保护字段不触碰", FindEntry(db, apiUuid).Strings.ReadSafe("Password") == "post-backup-pw");
+            Check("p3 restore 置 Modified", db.Modified);
+
+            env = WriteHandlers.RestoreBackup(db, "no-such-backup", true, false, extra);
+            Check("p3 restore 备份不存在 → backup_not_found", !Ok(env) && ErrCode(env) == "backup_not_found");
+
+            // ---- 6) P3 全局不变量：审计/备份全文无明文（含审批后写入的密码） ----
+            string allAudit3 = File.ReadAllText(ConfigPaths.AuditFile);
+            Check("p3 审计无明文（新密码也不出现）",
+                !allAudit3.Contains("new-pw-000") && !allAudit3.Contains("new-pw-111")
+                && !allAudit3.Contains("post-backup-pw") && !allAudit3.Contains("super-secret-123"));
+            bool backupsClean3 = true;
+            foreach (string f in Directory.GetFiles(ConfigPaths.BackupsDir, "*.json"))
+            {
+                string c = File.ReadAllText(f);
+                if (c.Contains("post-backup-pw") || c.Contains("new-pw-111") || c.Contains("super-secret-123"))
+                    backupsClean3 = false;
+            }
+            Check("p3 备份全文无明文", backupsClean3);
+        }
+
         // ---------- P2 helpers ----------
         private static bool Ok(Dictionary<string, object> env) => (bool)env["ok"];
 
@@ -511,6 +650,19 @@ namespace P1Probe.Tools
         {
             if (condition) { _passed++; Console.WriteLine($"  [PASS] {name}"); }
             else { _failed++; Console.WriteLine($"  [FAIL] {name}"); }
+        }
+    }
+
+    /// <summary>假审批通道：探针注入（允许/拒绝/超时），记录收到的审批请求。</summary>
+    internal sealed class FakeApproval : IApproval
+    {
+        public ApprovalOutcome Next = ApprovalOutcome.Allowed;
+        public List<ApprovalRequest> Requests = new List<ApprovalRequest>();
+
+        public ApprovalOutcome Confirm(ApprovalRequest request, TimeSpan timeout)
+        {
+            Requests.Add(request);
+            return Next;
         }
     }
 }

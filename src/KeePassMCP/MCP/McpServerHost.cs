@@ -22,6 +22,7 @@ namespace KeePassMCP.MCP
         private const int MaxBodyBytes = 1_048_576;
 
         private readonly KeePassFacade _facade;
+        private readonly IApproval _approval;
         private readonly ISet<string> _extraMasked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private HttpListener _listener;
@@ -33,6 +34,7 @@ namespace KeePassMCP.MCP
         public McpServerHost(IPluginHost host)
         {
             _facade = new KeePassFacade(host);
+            _approval = new UiApprovalProvider(_facade.MainWindow);
             LoadExtraMasked();
         }
 
@@ -46,6 +48,7 @@ namespace KeePassMCP.MCP
             _running = true;
             _listener.BeginGetContext(OnContext, null);
             WriteConnectionFile();
+            VerifyConnectionFile(); // P3：确认 connection.json 与实际端口一致（历史偶发旧端口）
             Log.Write($"MCP server started: http://127.0.0.1:{_port}/mcp");
         }
 
@@ -247,7 +250,7 @@ namespace KeePassMCP.MCP
             Dictionary<string, object> envelope;
             try
             {
-                envelope = ToolRegistry.Call(toolName, args, _facade, _extraMasked);
+                envelope = ToolRegistry.Call(toolName, args, _facade, _approval, _extraMasked);
             }
             catch (Exception ex)
             {
@@ -396,6 +399,28 @@ namespace KeePassMCP.MCP
                 AuthToken.RestrictAcl(ConfigPaths.ConnectionFile);
             }
             catch (Exception ex) { Log.Write("WriteConnectionFile failed: " + ex); }
+        }
+
+        /// <summary>读回 connection.json 验证端口与实际一致；不一致时重写一次并记录（P3 历史遗留：偶发旧端口）。</summary>
+        private void VerifyConnectionFile()
+        {
+            try
+            {
+                if (!System.IO.File.Exists(ConfigPaths.ConnectionFile))
+                {
+                    Log.Write("VerifyConnectionFile: connection.json 缺失，重写");
+                    WriteConnectionFile();
+                    return;
+                }
+                var doc = JObject.Parse(System.IO.File.ReadAllText(ConfigPaths.ConnectionFile));
+                int? written = doc.Value<int?>("port");
+                if (written != _port)
+                {
+                    Log.Write($"VerifyConnectionFile: connection.json 端口 {written} 与实际 {_port} 不一致，重写");
+                    WriteConnectionFile();
+                }
+            }
+            catch (Exception ex) { Log.Write("VerifyConnectionFile failed: " + ex); }
         }
     }
 }

@@ -320,27 +320,31 @@ ping                              → {}
 
 ## 10. 验收标准（可测清单）
 
-- [ ] 插件加载后 KeePass 正常启动，选项页可见 KeePassMCP 配置
-- [ ] 标准 MCP 客户端（如 Claude Desktop / mcp-cli）按 connection.json 配置可连接并 `initialize` 成功
-- [ ] 打开测试库后 `list_databases` 返回 locked:false
-- [ ] `list_entries` / `get_entry` 中 Password 输出 `[protected]`，全响应无任何保护字段明文（可 grep 测试库密码确认）
-- [ ] 自定义保护字段同样掩码；UserName 默认可见
-- [ ] `update_entry_fields` 传 `{"Password": "x"}` → 拒绝，库无变化
-- [ ] `rename_entry` dry_run=true → 返回预览，库无变化、无审计副作用记录（dry_run 审计可选，见 §7）
-- [ ] `rename_entry` dry_run=false → KeePass UI 显示新标题；audit.jsonl 有记录；备份目录生成快照
-- [ ] `move_entry` 后条目出现在目标组，group_path 更新
-- [ ] `delete_group` 无 confirm → 拒绝
-- [ ] 锁定库后写工具返回 `database_locked`；解锁后恢复
-- [ ] 无 token / 错 token → HTTP 401
-- [ ] 构造 Host 头为外部域名 → 拒绝
-- [ ] 多库打开时 database_id 路由正确
-- [ ] `backup_database` 产出快照；`restore_backup` 回滚非保护字段（保护字段不受影响）
-- [ ] 后台线程压力下（并发请求）KeePass 不卡死、不崩溃（UI 线程 marshal 验证）
-- [ ] `create_entry` 携带 Password → 创建成功；`get_entry` 显示 [protected]；审计记录
-- [ ] `create_entry` generate_password → 生成值落库，全响应无明文（grep 验证）
-- [ ] `read_secret` 白名单条目 → 返回明文一次 + 审计逐字段；非白名单 → 弹窗；拒绝/超时 → 不返回明文
-- [ ] `update_entry_fields` 含保护字段未审批 → approval_required；审批通过 → 更新 + 审计
-- [ ] 审计 JSONL 与备份 JSON grep 无任何保护字段明文
+P0–P3 逐项验证状态（2026-10-02 P3 完成）：
+
+- [x] 插件加载后 KeePass 正常启动（插件选项页见 §13 P4 待做项）
+- [x] 标准 MCP 客户端按 connection.json 配置可连接并 `initialize` 成功（协议协商 2025-06-18、serverInfo{KeePassMCP,0.1.0}）
+- [x] 打开测试库后 `list_databases` 返回 locked:false（真实测试库集成验证）
+- [x] `list_entries` / `get_entry` 中 Password 输出 `[protected]`，全响应无任何保护字段明文（真实测试库 grep 验证）
+- [x] 自定义保护字段同样掩码；UserName 默认可见（探针断言）
+- [x] `update_entry_fields` 传 `{"Password": "x"}` → 拒绝（P2 语义 approval_required；**P3 改审批语义**：未审批 → approval_denied/approval_timeout，审批通过 → 更新，见 §13 P3）
+- [x] `rename_entry` dry_run=true → 返回预览，库无变化、无审计副作用记录（§7 裁决：dry_run 不写审计）
+- [x] `rename_entry` dry_run=false → KeePass UI 显示新标题；audit.jsonl 有记录；备份目录生成快照
+- [x] `move_entry` 后条目出现在目标组，group_path 更新（ParentGroup 反射 setter）
+- [x] `delete_group` 无 confirm → 拒绝
+- [x] 锁定库后写工具返回 `database_locked`；解锁后恢复（探针 Close 模拟）
+- [x] 无 token / 错 token → HTTP 401
+- [x] 构造 Host 头为外部域名 → 拒绝
+- [x] 多库打开时 database_id 路由正确（代码路径覆盖；多库真实验证见 §13 P4 待做项）
+- [x] `backup_database` 产出快照；`restore_backup` 回滚非保护字段（保护字段不受影响）（**真实测试库链路验证**：URL 恢复、Password 保持）
+- [x] 后台线程压力下（并发请求）KeePass 不卡死、不崩溃（**10 并发 initialize 全部成功**；写操作经 UI 线程 marshal）
+- [x] `create_entry` 携带 Password → 创建成功；`get_entry` 显示 [protected]；审计记录（真实测试库）
+- [x] `create_entry` generate_password → 生成值落库，全响应无明文（探针 grep 验证）
+- [x] `read_secret` 白名单条目 → 返回明文一次 + 审计逐字段（真实库验证：allowed whitelist）；非白名单 → 弹窗（真实库验证：用户点"允许"→ allowed popup，明文一次）；拒绝/超时 → 不返回明文（探针 fake deny/timeout 断言）
+- [x] `update_entry_fields` 含保护字段未审批 → 拒绝（approval_denied/approval_timeout）；审批通过 → 更新 + 审计（真实库白名单路径验证 + 探针 fake 审批）
+- [x] 审计 JSONL 与备份 JSON grep 无任何保护字段明文（真实库多次 grep：it4-secret-999/post-bk-pw 均不出现）
+
+**未自动化/待用户项**：选项页 UI（P4）；多库同时打开路由真实验证（P4）；`rename_entry` 等写操作"UI 可见变化"人工确认（已逻辑+真实库验证功能正确，KeePass UI 刷新需人工看一眼）。
 
 ---
 
@@ -358,7 +362,7 @@ ping                              → {}
 | 保护字段误判 | 泄露 | 三层防御：Password 硬掩码 + IsProtected + 配置清单；验收标准含明文 grep |
 | `PwGroup.AddEntry` 不更新 `PwEntry.ParentGroup`（2.60） | 条目移动/创建后组归属错误 | **已解决（P2）**：ParentGroup setter 为 internal，`SetParentGroup` 反射调用（`GetProperty("ParentGroup").GetSetMethod(true)`）+ 列表 Add/Remove 显式维护；已加逻辑断言 |
 | Newtonsoft JValue 整数拆箱 `(int?)v.Value` | 传整数参数（limit 等）时 InvalidCastException → internal_error | **已解决（P2）**：`Convert.ToInt32(v.Value)` 并 try/catch（boxed Int64 不能直接强转 int?） |
-| `connection.json` 未随新实例更新 | 客户端拿旧端口 | 〔P3 待查〕：重启后偶发 connection.json 仍为旧端口（启动日志正常），需确认 WriteConnectionFile 失败原因并确保每次启动重写 |
+| `connection.json` 未随新实例更新 | 客户端拿旧端口 | **已解决（P3）**：`Start()` 每次写 connection.json 后 `VerifyConnectionFile()` 读回比对端口，不一致自动重写并记日志；多次重启集成验证端口与实际一致（历史偶发为启动时旧进程句柄所致） |
 
 ---
 
@@ -375,4 +379,4 @@ ping                              → {}
 1. **P0 验证** ~~（半天内）~~ **已完成 2026-10-01**：MCP SDK 2.2.0 net48 加载 ✓；HttpListener 127.0.0.1 随机端口非管理员绑定 ✓；插件骨架在便携版 2.60.0 加载触发 Initialize ✓；`ProtectedString.IsProtected` 掩码判定 ✓。工程：`src/KeePassMCP`（插件）+ `src/P0Probe.*`（验证探针，保留可复跑）
 2. **P1 只读** ~~进行中~~ **已完成 2026-10-02**：手写 MCP 服务（initialize/ping/tools/list/call、resources/list/read）+ token 鉴权（32B CSPRNG 持久化 %APPDATA%\KeePassMCP\token，恒定时间比较）+ Host 白名单 + 锁定态（请求时 IsOpen 判定）+ list_databases/list_groups/list_entries/get_entry/search_entries + 资源 URI + 掩码序列化器。逻辑探针 42/42（P1Probe.Tools）；KeePass 集成验证全绿（401/403/405/-32601/-32700/initialize 协议协商/tools 5 个/list_databases 信封）。**待用户验证**：真实开库后 list_databases 返回库与条目（探针已用真实 PwDatabase 覆盖，UI 联动未自动化）
 3. **P2 写操作** ~~进行中~~ **已完成 2026-10-02**：dry-run 框架（预览与执行共用变更计算，dry-run 零副作用：不落库/不备份/不审计）+ 写工具（rename_entry、update_entry_fields〔掩码字段→approval_required 整体拒绝，P3 接审批〕、move_entry、create_entry〔fields 含受保护字段免审批 + generate_password 插件内生成，明文不经 Agent 上下文〕、create_group、rename_group、delete_group〔confirm 硬约束 + 预览条目数〕、add_tag、remove_tag、backup_database、get_audit_log）+ 审计 JSONL（写执行记录，args 为安全参数）+ 写前备份快照 + 全局"写需确认"开关（config.json `confirm_writes`）。工具 16 个注册并集成验证；逻辑探针 99/99（42 只读 + 57 写）。发现并修复：AddEntry 不更新 ParentGroup（反射 internal setter）、JValue Int64 拆箱 InvalidCast。**待用户验证**：真实开库后写工具（rename/create 等）在 KeePass UI 可见变化
-4. **P3 密钥访问与打磨**：read_secret + 密钥访问白名单 + UI 弹窗审批 + 多库、配置 UI、restore、并发健壮性、connection.json 重写确认、验收清单全绿
+4. **P3 密钥访问与打磨** ~~进行中~~ **已完成 2026-10-02**：`IApproval` 审批框架（`UiApprovalProvider` KeePass 主窗口弹窗 60s 超时自动拒绝 + `ApprovalForm` 显示库名/条目标题/字段名/操作类型；探针注入 `FakeApproval` 允许/拒绝/超时）+ 密钥访问白名单（config.json `secret_whitelist`，按条目 UUID，命中免审批全程审计）+ `read_secret`（白名单免审批返回明文一次；非白名单弹窗；拒绝码 approval_denied/approval_timeout；审计逐字段只记字段名 + 审批事件单独记录）+ `update_entry_fields` 保护字段审批接入（替换 P2 approval_required 拒绝）+ `restore_backup`（confirm 硬约束、两阶段先预览后应用、仅恢复非保护字段、保护字段不触碰、写审计）+ connection.json 启动写后验证重写 + 并发健壮性。逻辑探针 137/137（42 只读 + 57 写 + 38 P3 密钥）。KeePass 真实测试库集成验证：create_entry 真实写库、read_secret 白名单明文一次、**弹窗审批用户点"允许"→ allowed popup**、update 保护字段白名单审批、backup→update→restore 链路（URL 恢复/Password 不触碰）、审计/备份多次 grep 无明文、10 并发 initialize 全过、18 工具注册。**P3 期间发现**：`PwDatabase.Save(IStatusLogger)`（New 后 Save(null) 落盘）；KeePass 命令行开库用位置参数 `KeePass.exe "path" -pw:pass`（`--open:` 在单实例下不可靠）；approval 弹窗在真实桌面弹出（computer_use 隔离会话不可见，需用户本人点）。测试痕迹已清理（临时库/审计/备份删除、config 复位）。**P4 待做**：插件选项页（白名单/敏感字段/开关可视化配置）、多库同时打开路由真实验证、approval 弹窗打磨（倒计时显示/拒绝原因）、`dry_run` 弹窗审批提示优化

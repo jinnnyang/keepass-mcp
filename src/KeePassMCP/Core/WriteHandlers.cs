@@ -20,16 +20,7 @@ namespace KeePassMCP.Core
     public static class WriteHandlers
     {
         // ================= 确认开关（Q3：全局"写需确认"） =================
-        public static bool ConfirmWritesRequired()
-        {
-            try
-            {
-                if (!System.IO.File.Exists(ConfigPaths.ConfigFile)) return false;
-                var cfg = JObject.Parse(System.IO.File.ReadAllText(ConfigPaths.ConfigFile));
-                return cfg.Value<bool?>("confirm_writes") == true;
-            }
-            catch { return false; }
-        }
+        public static bool ConfirmWritesRequired() => PluginConfig.ConfirmWrites();
 
         private static Dictionary<string, object> RequireConfirm(bool confirm)
         {
@@ -63,8 +54,9 @@ namespace KeePassMCP.Core
         }
 
         // ================= update_entry_fields =================
-        public static Dictionary<string, object> UpdateEntryFields(PwDatabase db, string entryUuid,
-            Dictionary<string, string> fields, bool confirm, bool dryRun, ISet<string> extraMasked)
+        public static Dictionary<string, object> UpdateEntryFields(PwDatabase db, IApproval approval,
+            ISet<string> whitelist, string entryUuid, Dictionary<string, string> fields,
+            bool confirm, bool dryRun, ISet<string> extraMasked)
         {
             var req = RequireConfirm(confirm);
             if (req != null) return req;
@@ -73,11 +65,23 @@ namespace KeePassMCP.Core
             PwEntry entry = FindEntry(db, entryUuid);
             if (entry == null) return ToolHandlers.Err("entry_not_found", $"条目 {entryUuid} 未找到");
 
-            foreach (var kv in fields)
+            // 含保护字段 → 密钥访问审批（§6.6，P3 接入；白名单免审批 / 弹窗 60s）
+            var protectedNames = fields.Keys.Where(f => IsProtectedFieldName(entry, f, extraMasked)).ToList();
+            if (protectedNames.Count > 0)
             {
-                if (IsProtectedFieldName(entry, kv.Key, extraMasked))
-                    return ToolHandlers.Err("approval_required",
-                        $"字段 '{kv.Key}' 是受保护字段，修改需密钥访问审批（P3 提供；当前阶段整体拒绝，库无变化）");
+                string method;
+                ApprovalOutcome outcome;
+                bool allowed = SecretHandlers.TryApprove(db, entry, approval, whitelist,
+                    "update_protected_fields", protectedNames, out outcome, out method);
+                AuditLog.Write("approval",
+                    new Dictionary<string, object> { ["action"] = OutcomeAction(outcome), ["method"] = method },
+                    entry.Uuid.ToHexString(), true, null, false);
+                if (!allowed)
+                {
+                    string code = outcome == ApprovalOutcome.TimedOut ? "approval_timeout" : "approval_denied";
+                    return ToolHandlers.Err(code,
+                        outcome == ApprovalOutcome.TimedOut ? "审批超时（60s），已拒绝" : "审批被拒绝，库无变化");
+                }
             }
 
             var changes = new List<Dictionary<string, object>>();
@@ -92,7 +96,7 @@ namespace KeePassMCP.Core
                     ["new"] = kv.Value
                 });
             }
-            // 审计安全参数：只列字段名，不记字段值（值可能含敏感信息，统一不记录）
+            // 审计安全参数：只列字段名，不记字段值
             var safeArgs = new Dictionary<string, object>
             {
                 ["entry_uuid"] = entryUuid,
@@ -103,11 +107,16 @@ namespace KeePassMCP.Core
                 {
                     foreach (var kv in fields)
                     {
-                        entry.Strings.Set(kv.Key, new ProtectedString(false, kv.Value));
+                        // 保护标志：目标字段当前 IsProtected 或 Password → 保持/强制 protected
+                        bool prot = IsProtectedFieldName(entry, kv.Key, extraMasked);
+                        entry.Strings.Set(kv.Key, new ProtectedString(prot, kv.Value));
                     }
                     entry.Touch(true);
                 }, safeArgs);
         }
+
+        private static string OutcomeAction(ApprovalOutcome o) =>
+            o == ApprovalOutcome.Allowed ? "allowed" : o == ApprovalOutcome.TimedOut ? "timeout" : "denied";
 
         // ================= move_entry =================
         public static Dictionary<string, object> MoveEntry(PwDatabase db, string entryUuid, string targetGroupUuid,
@@ -381,6 +390,125 @@ namespace KeePassMCP.Core
             });
         }
 
+        // ================= restore_backup（管理员破坏性；仅恢复非保护字段，保护字段不触碰） =================
+        public static Dictionary<string, object> RestoreBackup(PwDatabase db, string backupId,
+            bool confirm, bool dryRun, ISet<string> extraMasked)
+        {
+            if (!confirm)
+                return ToolHandlers.Err("confirmation_required", "restore_backup 是破坏性操作，需要 confirm:true");
+            string path = System.IO.Path.Combine(ConfigPaths.BackupsDir, backupId + ".json");
+            if (!System.IO.File.Exists(path))
+                return ToolHandlers.Err("backup_not_found", $"备份 {backupId} 不存在");
+            JObject manifest;
+            try { manifest = JObject.Parse(System.IO.File.ReadAllText(path)); }
+            catch { return ToolHandlers.Err("backup_corrupt", $"备份 {backupId} 无法解析"); }
+            var entries = manifest["entries"] as JArray ?? new JArray();
+
+            var changes = new List<Dictionary<string, object>>();
+            var pending = new List<RestoreItem>(); // 执行阶段才写库（dry-run 零副作用）
+            int skipped = 0, restored = 0;
+            foreach (JToken t in entries)
+            {
+                var dto = t as JObject;
+                if (dto == null) continue;
+                string uuid = (string)dto["uuid"];
+                string title = (string)dto["title"] ?? "";
+                if (uuid == null) continue;
+
+                PwEntry entry = FindEntry(db, uuid);
+                if (entry == null)
+                {
+                    changes.Add(new Dictionary<string, object>
+                    {
+                        ["action"] = "restore_skip",
+                        ["target"] = new Dictionary<string, object> { ["uuid"] = uuid, ["title"] = title },
+                        ["new"] = "备份条目当前不存在，跳过"
+                    });
+                    skipped++;
+                    continue;
+                }
+                // 跳过保护字段（含 Password）——只恢复非保护字段
+                var skipNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Password" };
+                var pfn = dto["protected_field_names"] as JArray;
+                if (pfn != null)
+                    foreach (JToken x in pfn)
+                        if (x.Type == JTokenType.String) skipNames.Add((string)x);
+
+                int restoredHere = 0;
+                foreach (string std in new[] { "Title", "UserName", "URL", "Notes" })
+                {
+                    if (skipNames.Contains(std)) continue;
+                    string v = (string)dto[std.ToLowerInvariant()];
+                    if (v != null && !string.Equals(entry.Strings.ReadSafe(std), v, StringComparison.Ordinal))
+                    {
+                        pending.Add(new RestoreItem(entry, std, v));
+                        restoredHere++;
+                    }
+                }
+                var custom = dto["custom_fields"] as JObject;
+                if (custom != null)
+                {
+                    foreach (var kv in custom)
+                    {
+                        if (skipNames.Contains(kv.Key) || kv.Value == null) continue;
+                        string v = kv.Value.Type == JTokenType.String ? (string)kv.Value : null;
+                        if (v != null && !string.Equals(entry.Strings.ReadSafe(kv.Key), v, StringComparison.Ordinal))
+                        {
+                            pending.Add(new RestoreItem(entry, kv.Key, v));
+                            restoredHere++;
+                        }
+                    }
+                }
+                if (restoredHere > 0)
+                {
+                    changes.Add(new Dictionary<string, object>
+                    {
+                        ["action"] = "restore",
+                        ["target"] = Target(entry),
+                        ["new"] = $"恢复 {restoredHere} 个非保护字段"
+                    });
+                    restored += restoredHere;
+                }
+            }
+            if (changes.Count == 0)
+                return ToolHandlers.Ok(new Dictionary<string, object>
+                {
+                    ["dry_run"] = dryRun,
+                    ["changes"] = changes,
+                    ["summary"] = new Dictionary<string, object> { ["restored"] = 0, ["skipped"] = skipped },
+                    ["note"] = "无字段变化（备份与当前一致或备份条目均已删除）"
+                });
+            if (dryRun)
+                return ToolHandlers.Ok(new Dictionary<string, object>
+                {
+                    ["dry_run"] = true, ["changes"] = changes,
+                    ["summary"] = new Dictionary<string, object> { ["restored"] = restored, ["skipped"] = skipped }
+                });
+            // 执行：仅恢复非保护字段
+            foreach (RestoreItem item in pending)
+                item.Entry.Strings.Set(item.Field, new ProtectedString(false, item.Value));
+            var touchedSet = new HashSet<PwEntry>();
+            foreach (RestoreItem item in pending) touchedSet.Add(item.Entry);
+            foreach (PwEntry e in touchedSet) e.Touch(true);
+            db.Modified = true;
+            AuditLog.Write("restore_backup",
+                new Dictionary<string, object> { ["backup_id"] = backupId, ["restored"] = restored, ["skipped"] = skipped },
+                backupId, true, null, false);
+            return ToolHandlers.Ok(new Dictionary<string, object>
+            {
+                ["dry_run"] = false, ["changes"] = changes,
+                ["summary"] = new Dictionary<string, object> { ["restored"] = restored, ["skipped"] = skipped },
+                ["executed"] = true
+            });
+        }
+
+        /// <summary>restore 待应用项（两阶段：先收集预览，执行阶段才写库）。</summary>
+        private sealed class RestoreItem
+        {
+            public PwEntry Entry; public string Field; public string Value;
+            public RestoreItem(PwEntry entry, string field, string value) { Entry = entry; Field = field; Value = value; }
+        }
+
         // ================= 内部框架 =================
         private static Dictionary<string, object> RunWrite(PwDatabase db, string tool, string targetUuid, bool dryRun,
             List<Dictionary<string, object>> changes, Action apply, Dictionary<string, object> safeArgs)
@@ -430,7 +558,7 @@ namespace KeePassMCP.Core
         }
 
         // ================= 查找与路径 =================
-        private static PwEntry FindEntry(PwDatabase db, string uuidHex)
+        internal static PwEntry FindEntry(PwDatabase db, string uuidHex)
         {
             if (string.IsNullOrEmpty(uuidHex)) return null;
             return FindEntryRec(db.RootGroup, uuidHex);

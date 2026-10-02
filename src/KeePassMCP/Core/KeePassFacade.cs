@@ -23,6 +23,9 @@ namespace KeePassMCP.Core
             _mainWindow = host.MainWindow as MainForm;
         }
 
+        /// <summary>KeePass 主窗口（审批弹窗 owner）。</summary>
+        public System.Windows.Forms.Control MainWindow => _mainWindow;
+
         /// <summary>在 UI 线程执行并同步等待结果。</summary>
         public T UiInvoke<T>(Func<T> func)
         {

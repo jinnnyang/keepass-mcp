@@ -208,12 +208,11 @@ flowchart LR
 - [x] ~~写自主权~~ **已决（2026-10-01 第二轮访谈）**：白名单自主 + 全局"写需确认"开关
 - [x] ~~落盘~~ **已决（2026-10-01 第二轮访谈）**：可配置，默认手动保存
 
-## 12. 下一步（P3 密钥访问与打磨）
+## 12. 下一步（P4 打磨与配置 UI）
 
-**P2 写操作已完成（2026-10-02）**：dry-run 框架 + 10 个写工具 + get_audit_log（工具共 16 个）；create_entry 支持受保护字段传值与 generate_password（插件内生成，明文不经 Agent 上下文）；审计 JSONL + 写前备份；全局确认开关。逻辑探针 99/99；KeePass 集成验证（tools/list 16、写工具无库错误路径、get_audit_log）全绿。**待用户验证**：真实开库后写工具在 KeePass UI 的变化。
+**P3 密钥访问与打磨已完成（2026-10-02）**：IApproval 审批框架（KeePass 主窗口弹窗 60s 超时自动拒绝）+ 密钥访问白名单（config.json `secret_whitelist`）+ read_secret（白名单免审批 / 弹窗审批 / 明文仅一次返回 / 审计逐字段 + 审批事件）+ update_entry_fields 保护字段审批接入 + restore_backup（仅恢复非保护字段）+ connection.json 启动写后验证 + 并发健壮性。逻辑探针 137/137；**真实测试库集成验证全绿**（create_entry 写库、白名单明文一次、弹窗审批用户点"允许"、backup→update→restore 链路、审计/备份无明文 grep、10 并发 initialize）。18 工具注册。测试痕迹已清理。
 
-进入 **P3**（按 HANDOFF §13）：
-1. read_secret + 密钥访问白名单 + KeePass UI 弹窗审批（60s 超时拒绝）
-2. update_entry_fields 保护字段审批接入（替换当前 approval_required 拒绝）
-3. restore_backup、多库/配置 UI、并发健壮性、connection.json 重写确认
-4. HANDOFF §10 验收清单逐项全绿
+进入 **P4**（按 HANDOFF §13）：
+1. 插件选项页：白名单/附加敏感字段/全局确认开关可视化配置
+2. 多库同时打开路由真实验证；approval 弹窗打磨（倒计时显示、拒绝原因）
+3. HANDOFF §10 剩余人工确认项（写操作 UI 可见变化）

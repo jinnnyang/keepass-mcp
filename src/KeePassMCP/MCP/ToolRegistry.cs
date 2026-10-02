@@ -130,6 +130,27 @@ namespace KeePassMCP.MCP
                         ["additionalProperties"] = false
                     }
                 },
+                // ================= 密钥访问（P3） =================
+                new Dictionary<string, object>
+                {
+                    ["name"] = "read_secret",
+                    ["description"] = "读取条目受保护字段明文一次：白名单条目免审批；非白名单弹 KeePass 弹窗（60s 超时拒绝）。" +
+                        "明文仅在本响应返回一次，访问与审批全部记入审计（只记字段名不记值）。拒绝码 approval_denied / approval_timeout。",
+                    ["inputSchema"] = new Dictionary<string, object>
+                    {
+                        ["type"] = "object",
+                        ["properties"] = new Dictionary<string, object>
+                        {
+                            ["database_id"] = StrSchema("库 id"),
+                            ["entry_uuid"] = StrSchema("条目 uuid"),
+                            ["fields"] = new Dictionary<string, object>
+                            { ["type"] = "array", ["items"] = new Dictionary<string, object> { ["type"] = "string" },
+                              ["description"] = "可选：要读取的受保护字段名；缺省为全部受保护字段（含 Password）" }
+                        },
+                        ["required"] = new List<string> { "database_id", "entry_uuid" },
+                        ["additionalProperties"] = false
+                    }
+                },
                 // ================= 写工具（P2） =================
                 WriteDef("rename_entry", "重命名条目标题", new Dictionary<string, object>
                 {
@@ -137,13 +158,13 @@ namespace KeePassMCP.MCP
                     ["new_title"] = StrSchema("新标题"),
                     ["confirm"] = BoolSchema("全局确认开关开启时需要 true"), ["dry_run"] = BoolSchema("只返回变更预览，不落库")
                 }, new List<string> { "database_id", "entry_uuid", "new_title" }),
-                WriteDef("update_entry_fields", "更新条目非保护字段；请求含受保护字段名（如 Password）时整体拒绝（需审批，P3）",
+                WriteDef("update_entry_fields", "更新条目字段；含受保护字段名（如 Password）时需密钥访问审批（白名单免审批 / KeePass 弹窗 60s 超时拒绝，P3）",
                     new Dictionary<string, object>
                 {
                     ["database_id"] = StrSchema("库 id"), ["entry_uuid"] = StrSchema("条目 uuid"),
                     ["fields"] = new Dictionary<string, object>
                     { ["type"] = "object", ["additionalProperties"] = new Dictionary<string, object> { ["type"] = "string" },
-                      ["description"] = "要更新的字段：{字段名: 新值}，仅非保护字段（Title/UserName/URL/Notes/自定义）" },
+                      ["description"] = "要更新的字段：{字段名: 新值}；非保护字段直接更新，受保护字段走审批（值仅在审批通过后写入并进本次响应）" },
                     ["confirm"] = BoolSchema("全局确认开关开启时需要 true"), ["dry_run"] = BoolSchema("只返回变更预览，不落库")
                 }, new List<string> { "database_id", "entry_uuid", "fields" }),
                 WriteDef("move_entry", "移动条目到目标分组（重新分类）", new Dictionary<string, object>
@@ -211,14 +232,20 @@ namespace KeePassMCP.MCP
                 WriteDef("backup_database", "立即对整库做非保护字段快照（不修改库；审计记录）", new Dictionary<string, object>
                 {
                     ["database_id"] = StrSchema("库 id")
-                }, new List<string> { "database_id" })
+                }, new List<string> { "database_id" }),
+                WriteDef("restore_backup", "按备份回滚条目的非保护字段（保护字段不触碰；破坏性，confirm 必须为 true）",
+                    new Dictionary<string, object>
+                {
+                    ["database_id"] = StrSchema("库 id"), ["backup_id"] = StrSchema("备份 id（backup_database 返回）"),
+                    ["confirm"] = BoolSchema("必须为 true 才执行"), ["dry_run"] = BoolSchema("只返回变更预览，不落库")
+                }, new List<string> { "database_id", "backup_id", "confirm" })
             };
             return defs;
         }
 
-        /// <summary>tools/call 分派：返回信封（{ok,data|error}）。写工具经 UI 线程执行。</summary>
+        /// <summary>tools/call 分派：返回信封（{ok,data|error}）。写工具与密钥访问经 UI 线程执行。</summary>
         public static Dictionary<string, object> Call(string toolName, JToken args,
-            KeePassFacade facade, ISet<string> extraMasked)
+            KeePassFacade facade, IApproval approval, ISet<string> extraMasked)
         {
             if (facade == null) return ToolHandlers.Err("host_unavailable", "KeePass 宿主不可用");
             var dbs = facade.GetDatabases();
@@ -243,6 +270,12 @@ namespace KeePassMCP.MCP
                         ["entries"] = AuditLog.ReadRecent(OptInt(args, "limit") ?? 50, OptStr(args, "since"))
                     });
 
+                // ---------- 密钥访问（白名单免审批；弹窗在 UI 线程） ----------
+                case "read_secret":
+                    return UiWrite(facade, () => ResolveOpenDb(facade, args, out var rsE, out var rsDb) ? rsE :
+                        SecretHandlers.ReadSecret(rsDb, approval, PluginConfig.SecretWhitelist(),
+                            Str(args, "entry_uuid"), StrList(args, "fields")));
+
                 // ---------- 写（UI 线程 marshal） ----------
                 case "rename_entry":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var dberr, out var db) ? dberr :
@@ -250,7 +283,8 @@ namespace KeePassMCP.MCP
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false));
                 case "update_entry_fields":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var ue, out var udb) ? ue :
-                        WriteHandlers.UpdateEntryFields(udb, Str(args, "entry_uuid"), StrMap(args, "fields"),
+                        WriteHandlers.UpdateEntryFields(udb, approval, PluginConfig.SecretWhitelist(),
+                            Str(args, "entry_uuid"), StrMap(args, "fields"),
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false, extraMasked));
                 case "move_entry":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var me, out var mdb) ? me :
@@ -284,6 +318,10 @@ namespace KeePassMCP.MCP
                 case "backup_database":
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var be, out var bdb) ? be :
                         WriteHandlers.BackupDatabase(bdb));
+                case "restore_backup":
+                    return UiWrite(facade, () => ResolveOpenDb(facade, args, out var re, out var rdb) ? re :
+                        WriteHandlers.RestoreBackup(rdb, Str(args, "backup_id"),
+                            OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false, extraMasked));
 
                 default:
                     return ToolHandlers.Err("unknown_tool", $"工具 {toolName} 不存在");
@@ -394,6 +432,18 @@ namespace KeePassMCP.MCP
                     map[kv.Key] = (string)v.Value;
             }
             return map;
+        }
+
+        private static List<string> StrList(JToken e, string key)
+        {
+            if (e is JObject o && o[key] is JArray arr)
+            {
+                var list = new List<string>();
+                foreach (JToken t in arr)
+                    if (t.Type == JTokenType.String) list.Add((string)t);
+                return list;
+            }
+            return null;
         }
     }
 }
