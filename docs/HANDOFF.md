@@ -315,6 +315,7 @@ ping                              → {}
 7. **配置 UI**〔建议〕：`Tools → Options` 加一页（KeePass 配置扩展机制），展示：服务状态、端口、token、连接配置片段（一键复制）、重置 token、密钥访问白名单、附加敏感字段清单、是否记录只读审计。
 8. **异常处理**：所有工具调用包 try/catch，返回 `{ok:false, error:{code, message}}`；不向 Agent 泄露堆栈细节。
 9. **卸载安全**：Terminate 时停止 listener、关闭文件句柄；不残留后台线程。
+10. **发布形态（plgx，2026-10-02 记录，未实施）**：`.plgx` 是 KeePass 插件打包格式——用 KeePass 自带的 PLGX 编译器（工具 → PLGX 编译器）把主 DLL + 依赖压成单个自解压文件，加载时解压到临时缓存再加载；官方/社区插件（如 KeePassRPC）发布常用此形态。开发期用**目录形态**（`Plugins\KeePassMCP\KeePassMCP.dll` + 依赖同放子目录，KeePass 2.60 递归扫描子目录，加载内容等价）原因：① 迭代快（改→编译→拷 DLL，plgx 每次要重打包+验证）；② 逻辑探针项目直接引用同一 DLL 跑断言；③ 依赖隔离不污染 Plugins\ 根（根目录 DLL 进默认 AppDomain，多插件共存易版本冲突）。**分发给最终用户时**用 PLGX 编译器将 KeePassMCP.dll 打成单文件 `.plgx` 即可，与官方形态一致（需要时再实施）。
 
 ---
 

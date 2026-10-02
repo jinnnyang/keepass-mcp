@@ -21,6 +21,7 @@ KeePass 2.x 原生 MCP 插件：向标准 MCP 客户端（moirai 等本地 Agent
 - 插件 DLL：复制 `KeePassMCP.dll` + `Newtonsoft.Json.dll` 到 `Plugins\KeePassMCP\` 子目录（依赖必须同目录）[来源: docs/HANDOFF.md §9.2]
 - 更新 DLL 前必须结束 KeePass 进程（DLL 被锁 → Copy-Item 静默失败）
 - 本机验证目标：KeePass 2.60.0 便携版 `C:\Programs\KeePass\2.60.0\windows\amd64`
+- **发布形态**：开发期用目录形态（迭代快、探针引用同一 DLL、依赖隔离）；分发时可用 KeePass 自带 PLGX 编译器打成单个 `.plgx` 文件（官方插件形态，未实施，见 HANDOFF §9.10）
 
 ### 数据目录（`%APPDATA%\KeePassMCP\`，可用 `KeePassMCP_DATA_DIR` 覆盖）
 | 文件 | 用途 |
