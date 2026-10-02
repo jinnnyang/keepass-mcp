@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using KeePassLib;
+using KeePassLib.Security;
 
 namespace KeePassMCP.Core
 {
@@ -72,21 +73,36 @@ namespace KeePassMCP.Core
             return null;
         }
 
-        /// <summary>读取配置条目 CustomData.Token（不存在返回 null）。</summary>
+        /// <summary>
+        /// 读取配置条目 token：优先 CustomData.Token（P7 tab UI 写入方式，KeePass 原生 UI 无法添加 CustomData）；
+        /// 回退字符串字段 "Token"（须 Protect=True，可用 KeePass 原生 UI 添加，用户自设值，过渡期 UX）。
+        /// 不存在返回 null。
+        /// </summary>
         public static string GetCustomToken(PwEntry serverEntry)
         {
-            if (serverEntry == null || serverEntry.CustomData == null) return null;
+            if (serverEntry == null) return null;
+            // 优先 CustomData（设计主路径）
+            if (serverEntry.CustomData != null)
+            {
+                try
+                {
+                    if (serverEntry.CustomData.Exists(CustomTokenKey))
+                    {
+                        string v = serverEntry.CustomData.Get(CustomTokenKey);
+                        if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+                    }
+                }
+                catch (Exception ex) { Log.Write("LibraryConfig.GetCustomToken(CustomData) failed: " + ex.Message); }
+            }
+            // 回退：字符串字段 Token（必须 Protect=True——token 是密钥，非保护字段不认）
             try
             {
-                if (!serverEntry.CustomData.Exists(CustomTokenKey)) return null;
-                string v = serverEntry.CustomData.Get(CustomTokenKey);
-                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+                ProtectedString ps = serverEntry.Strings.Get(CustomTokenKey);
+                if (ps != null && ps.IsProtected && !string.IsNullOrWhiteSpace(ps.ReadString()))
+                    return ps.ReadString().Trim();
             }
-            catch (Exception ex)
-            {
-                Log.Write("LibraryConfig.GetCustomToken failed: " + ex.Message);
-                return null;
-            }
+            catch (Exception ex) { Log.Write("LibraryConfig.GetCustomToken(field) failed: " + ex.Message); }
+            return null;
         }
 
         /// <summary>收集库内带指定标签条目的 uuid 集合（集合型配置：白/黑名单）。</summary>

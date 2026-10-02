@@ -642,10 +642,25 @@ namespace P1Probe.Tools
             Check("p6 FindServerEntry 空库 null",
                 LibraryConfig.FindServerEntry(new List<PwDatabase> { BuildEmptyDatabase() }, out var od) == null);
 
-            // ---- 2) CustomData.Token 读取 ----
+            // ---- 2) CustomData.Token 读取 + 字段 Token 回退 ----
             Check("p6 GetCustomToken 读回", LibraryConfig.GetCustomToken(FindEntry(db, serverUuid)) == "lib-token-xyz");
             var noTokenEntry = FindEntry(db, apiUuid);
             Check("p6 GetCustomToken 无 Token 返回 null", LibraryConfig.GetCustomToken(noTokenEntry) == null);
+
+            // 字段回退：KeePassMCP.Server.Field（无 CustomData，字段 Token Protect=True）→ 读回
+            var fieldServer = new PwEntry(FindGroupByName(db, "Work"), true, true);
+            fieldServer.Strings.Set("Title", new ProtectedString(false, "KeePassMCP.Server.Field"));
+            fieldServer.Strings.Set("Token", new ProtectedString(true, "field-token-abc"));
+            FindGroupByName(db, "Work").AddEntry(fieldServer, true);
+            Check("p6 GetCustomToken 字段回退读回", LibraryConfig.GetCustomToken(fieldServer) == "field-token-abc");
+            Check("p6 FindServerEntry 多服务器后缀命中", LibraryConfig.FindServerEntry(dbs, out var _) != null
+                && LibraryConfig.IsServerTitle("KeePassMCP.Server.Field"));
+            // 非保护字段 Token 不认（token 是密钥，必须 Protect）
+            var fieldServer2 = new PwEntry(FindGroupByName(db, "Work"), true, true);
+            fieldServer2.Strings.Set("Title", new ProtectedString(false, "KeePassMCP.Server.F2"));
+            fieldServer2.Strings.Set("Token", new ProtectedString(false, "plain-token"));
+            FindGroupByName(db, "Work").AddEntry(fieldServer2, true);
+            Check("p6 GetCustomToken 非保护字段不认", LibraryConfig.GetCustomToken(fieldServer2) == null);
 
             // ---- 3) 白/黑名单标签收集 + 并集 ----
             var white = LibraryConfig.CollectTaggedUuids(db, LibraryConfig.WhitelistTag);
