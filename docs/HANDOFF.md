@@ -259,7 +259,7 @@ ping                              → {}
 **配置模型（ADR-0003 字段体系，2026-10-03 定稿；取代本段早前"标题前缀 + CustomData + 标签 + secret_whitelist"方案，0002 废止）**：
 - 配置条目 = 字符串字段 `_mcp_config=1` 标记（任意标题、任意分组、多条目并存）；被标记条目整条目掩码 + 备份排除
 - 监听 = `_mcp_server=1` 启用 + `_mcp_listening=127.0.0.1:6789`（`;` 多地址；端口占用自动 +1）；**全部生效配置条目 `_mcp_server=0` → 服务停止且不启动**（评审 H3 修复）
-- 鉴权 = token 双字段（2026-10-03）：**Password 为权威输入框**（KeePass 前端直接编辑，原生保护字段）+ `_mcp_token` 为同步镜像（读取 Password 非空优先、空回退 `_mcp_token`；保存/打开后 SyncTokenFields 用 Password 覆盖 `_mcp_token`）；并集（`;` 分隔，任一匹配放行；并集为空 → 无鉴权，仅回环）
+- 鉴权 = token 双字段（2026-10-03，P6-3m 双向同步）：**Password 为权威输入框**（KeePass 前端直接编辑，原生保护字段）+ `_mcp_token` 为镜像（读取 Password 非空优先、空回退 `_mcp_token`）；**双向**：快照追踪判定用户改了哪个字段——改 Password → 覆盖 `_mcp_token`，改 `_mcp_token` → 覆盖 Password，双变冲突 Password 优先，`_mcp_token` 清空 → Password 填回，Password 空 → 不动；触发 FileSavingPre（保存前随本次落盘）+ Start（重启首次见 Password 权威一致化）+ RefreshToken 兜底；快照仅内存，重启失效；并集（`;` 分隔，任一匹配放行；并集为空 → 无鉴权，仅回环）
 - 作用域 = `_mcp_scope_self=1` 条目不并入全局 token/监听/default 聚合（防共享库配置漂移，评审 M5 增补）
 - 权限 = 六权限（Read/ReadProtected/Write/WriteProtected/Move/List）+ 审计/快照两个全局位；判定优先级：**条目显式字段 → 生效配置条目 default 布尔最严聚合（顺序无关，任一 0 即拒）→ 硬编码默认**（评审 H5 定稿）
 - 配置条目 default 字段：`_mcp_read_default=1` / `_mcp_read_protected_default=0` / `_mcp_write_default=1` / `_mcp_write_protected_default=0` / `_mcp_move_default=1` / `_mcp_list_default=1` / `_mcp_audit_default=0` / `_mcp_backup_default=0` / `_mcp_save_default=0`（审计读/整库快照/显式落盘默认拒绝——M3/M6/P6-3l）

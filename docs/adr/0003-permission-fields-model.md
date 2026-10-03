@@ -33,7 +33,7 @@
 用户在前端（KeePass 条目编辑界面的 **Password 输入框**）直接查看/修改鉴权 token：
 
 - **读取（`ReadToken`）**：Password 非空 → 用之（用户编辑 Password 即生效；Password 为 KeePass 原生保护字段，消除"忘勾保护"风险）；Password 为空 → 回退 `_mcp_token`（兼容绑定前自动创建的旧条目）
-- **同步（`SyncTokenFields`，P6-3j 修复版）**：**FileSavingPre**（保存前同步、随本次落盘，无二次保存提示）+ **Start**（打开/解锁库即修复历史不一致）+ RefreshToken 兜底；同步后置所属库 `db.Modified`（磁盘最终一致）；Password 为空 → 保留 `_mcp_token` 不动
+- **同步（`SyncTokenFields`，P6-3m 双向版）**：进程内快照记录每配置条目上次同步的 `(Password, _mcp_token)`，保存/启动时对比判定——仅 Password 变 → 覆盖 `_mcp_token`；仅 `_mcp_token` 变 → 覆盖 Password（Advanced 页修改同样生效）；两字段同时变 → 冲突 Password 优先（记警告）；`_mcp_token` 被清空 → Password 填回；Password 为空 → 不动（保留回退路径）。触发点：**FileSavingPre**（保存前同步、随本次落盘）+ **Start**（重启后首次见 → Password 权威一致化修复）+ RefreshToken 兜底；同步后置所属库 `db.Modified`。快照仅存内存，重启即失效（退回 Password 权威一致化语义）
 - **创建（`EnsureDefaultConfig`）**：Password 与 `_mcp_token` 同时写入相同随机值
 - 语义声明：修改 token 请编辑 Password 输入框；在 Advanced 页直接改 `_mcp_token` 会在下次同步时被 Password 覆盖
 
