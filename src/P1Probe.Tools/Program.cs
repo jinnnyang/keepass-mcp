@@ -674,6 +674,7 @@ namespace P1Probe.Tools
             LibraryConfig.SyncTokenFields(dbs);
             Check("p6 SyncTokenFields Password 覆盖 _mcp_token",
                 LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "rotated-at-frontend");
+            Check("p6 SyncTokenFields 置库 Modified（同步落盘）", db.Modified == true);
             Check("p6 SyncTokenFields 同步后 ReadToken 取 Password",
                 LibraryConfig.ReadToken(FindEntry(db, cfgUuid)) == "rotated-at-frontend");
             // Password 为空 → 保留 _mcp_token（回退路径不动）

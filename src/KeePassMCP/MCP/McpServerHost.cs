@@ -146,6 +146,10 @@ namespace KeePassMCP.MCP
             try { LibraryConfig.EnsureDefaultConfig(_facade.GetDatabases()); }
             catch (Exception ex) { Log.Write("EnsureDefaultConfig failed: " + ex); }
 
+            // 2026-10-03：token 双字段同步（重启/解锁后磁盘可能留旧 _mcp_token，先同步再读 token）
+            try { LibraryConfig.SyncTokenFields(_facade.GetDatabases()); }
+            catch (Exception ex) { Log.Write("SyncTokenFields failed: " + ex.Message); }
+
             // H3：全部生效配置条目 _mcp_server=0 → 不监听（字段名存实亡修复）
             try
             {

@@ -305,7 +305,8 @@ namespace KeePassMCP.Core
 
         /// <summary>token 双字段同步（2026-10-03 需求：绑定 Password 输入框 + 两字段同步）：
         /// Password 为权威输入框（KeePass 前端直接编辑），_mcp_token 为机器可读镜像。
-        /// Password 非空且与 _mcp_token 不一致 → 用 Password 覆盖 _mcp_token（内存同步；读取时 Password 已优先，无需落盘）；
+        /// Password 非空且与 _mcp_token 不一致 → 用 Password 覆盖 _mcp_token 并置所属库 db.Modified（同步落盘，
+        /// 由 FileSavingPre 触发时随本次保存落盘、由 Start/RefreshToken 触发时提示用户保存）；
         /// Password 为空 → 保留 _mcp_token（旧条目回退路径，兼容自动创建前的配置）。</summary>
         public static void SyncTokenFields(IEnumerable<PwDatabase> dbs)
         {
@@ -318,10 +319,34 @@ namespace KeePassMCP.Core
                     string mcp = ReadMcpField(e, TokenField);
                     if (string.IsNullOrWhiteSpace(pw) || string.Equals(pw, mcp, StringComparison.Ordinal)) continue;
                     e.Strings.Set(TokenField, new ProtectedString(true, pw));
-                    Log.Write($"配置条目 {SafeEntryTitle(e)} 的 _mcp_token 已与 Password 同步");
+                    PwDatabase db = DatabaseOf(dbs, e);
+                    if (db != null) db.Modified = true;
+                    Log.Write($"配置条目 {SafeEntryTitle(e)} 的 _mcp_token 已与 Password 同步（置库 Modified）");
                 }
                 catch (Exception ex) { Log.Write("SyncTokenFields failed: " + ex.Message); }
             }
+        }
+
+        /// <summary>定位条目所属库（KeePassLib PwEntry 无 GetDatabase()，按根组递归引用匹配）。</summary>
+        private static PwDatabase DatabaseOf(IEnumerable<PwDatabase> dbs, PwEntry entry)
+        {
+            if (dbs == null || entry == null) return null;
+            foreach (PwDatabase db in dbs)
+            {
+                if (db == null || db.RootGroup == null) continue;
+                if (FindEntryInGroup(db.RootGroup, entry)) return db;
+            }
+            return null;
+        }
+
+        private static bool FindEntryInGroup(PwGroup group, PwEntry target)
+        {
+            if (group == null) return false;
+            foreach (PwEntry e in group.Entries)
+                if (ReferenceEquals(e, target)) return true;
+            foreach (PwGroup g in group.Groups)
+                if (FindEntryInGroup(g, target)) return true;
+            return false;
         }
 
         private static string ReadPasswordValue(PwEntry entry)

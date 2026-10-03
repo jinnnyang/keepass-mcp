@@ -30,6 +30,8 @@ namespace KeePassMCP
                     // 库生命周期驱动（P6）：解锁/打开 → 启动或刷新；关闭/锁定 → 全部锁定则停服
                     _mainWindow.FileOpened += (s, e) => SyncServer();
                     _mainWindow.FileClosed += (s, e) => SyncServer();
+                    // 保存前同步 token 双字段（P6-3l：Password 权威 → _mcp_token 镜像，改动随本次保存落盘，避免二次保存提示）
+                    _mainWindow.FileSavingPre += (s, e) => SyncBeforeSave();
                     // 保存后配置条目可能更新 token → 刷新（保持客户端拿到的 token 与库内一致）
                     _mainWindow.FileSaved += (s, e) => _server?.RefreshToken();
                 }
@@ -54,6 +56,7 @@ namespace KeePassMCP
                 {
                     _mainWindow.FileOpened -= (s, e) => SyncServer();
                     _mainWindow.FileClosed -= (s, e) => SyncServer();
+                    _mainWindow.FileSavingPre -= (s, e) => SyncBeforeSave();
                     _mainWindow.FileSaved -= (s, e) => _server?.RefreshToken();
                 }
                 _server?.Stop();
@@ -61,6 +64,15 @@ namespace KeePassMCP
                 Log.Write("KeePassMCP terminated");
             }
             catch { }
+        }
+
+        /// <summary>保存前同步 token 双字段（FileSavingPre；Password 权威 → _mcp_token 镜像，改动随本次保存落盘，
+        /// 不产生二次保存提示；见 ADR-0003 token 双字段绑定）。</summary>
+        private void SyncBeforeSave()
+        {
+            if (_server == null) return;
+            try { LibraryConfig.SyncTokenFields(_server.Facade.GetDatabases()); }
+            catch (Exception ex) { Log.Write("SyncBeforeSave failed: " + ex.Message); }
         }
 
         /// <summary>生命周期同步：有解锁库 → 启动（若未运行）或刷新 token；无 → 停止（锁库即服务停）。</summary>
