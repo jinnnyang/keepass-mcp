@@ -303,11 +303,17 @@ namespace KeePassMCP.Core
             return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
         }
 
-        /// <summary>token 双字段同步（2026-10-03 需求：绑定 Password 输入框 + 两字段同步）：
-        /// Password 为权威输入框（KeePass 前端直接编辑），_mcp_token 为机器可读镜像。
-        /// Password 非空且与 _mcp_token 不一致 → 用 Password 覆盖 _mcp_token 并置所属库 db.Modified（同步落盘，
-        /// 由 FileSavingPre 触发时随本次保存落盘、由 Start/RefreshToken 触发时提示用户保存）；
-        /// Password 为空 → 保留 _mcp_token（旧条目回退路径，兼容自动创建前的配置）。</summary>
+        private sealed class TokenSnapshot { public string Password; public string Mcp; }
+
+        /// <summary>进程内快照：每个配置条目上次同步后的 (Password, _mcp_token)，用于判定"用户改了哪个字段"（双向同步）。
+        /// 重启后快照清空 → 首次见走单向修复（Password 权威一致化）。</summary>
+        private static readonly Dictionary<string, TokenSnapshot> TokenSnapshots =
+            new Dictionary<string, TokenSnapshot>();
+
+        /// <summary>token 双字段双向同步（P6-3m，2026-10-03）：
+        /// 快照追踪判断用户改了哪个字段——改 Password → _mcp_token 跟随；改 _mcp_token → Password 跟随；
+        /// 两字段同时变化 → 冲突，Password 权威；Password 为空 → 不动（保留 _mcp_token 回退路径）；
+        /// 首次见（重启/新条目）→ Password 权威一致化修复。同步后置所属库 db.Modified（落盘）。</summary>
         public static void SyncTokenFields(IEnumerable<PwDatabase> dbs)
         {
             if (dbs == null) return;
@@ -317,11 +323,48 @@ namespace KeePassMCP.Core
                 {
                     string pw = ReadPasswordValue(e);
                     string mcp = ReadMcpField(e, TokenField);
-                    if (string.IsNullOrWhiteSpace(pw) || string.Equals(pw, mcp, StringComparison.Ordinal)) continue;
-                    e.Strings.Set(TokenField, new ProtectedString(true, pw));
+                    string key = e.Uuid.ToHexString();
                     PwDatabase db = DatabaseOf(dbs, e);
-                    if (db != null) db.Modified = true;
-                    Log.Write($"配置条目 {SafeEntryTitle(e)} 的 _mcp_token 已与 Password 同步（置库 Modified）");
+
+                    if (!TokenSnapshots.TryGetValue(key, out var snap))
+                    {
+                        // 首次见（重启/新条目）：Password 权威一致化修复（含 _mcp_token 字段缺失）
+                        if (pw != null && (mcp == null || !string.Equals(pw, mcp, StringComparison.Ordinal)))
+                        {
+                            e.Strings.Set(TokenField, new ProtectedString(true, pw));
+                            if (db != null) db.Modified = true;
+                            Log.Write($"配置条目 {SafeEntryTitle(e)} 首次见修复：_mcp_token 对齐 Password");
+                        }
+                        TokenSnapshots[key] = new TokenSnapshot { Password = pw ?? "", Mcp = mcp ?? "" };
+                        continue;
+                    }
+
+                    bool pwChanged = !string.Equals(pw ?? "", snap.Password, StringComparison.Ordinal);
+                    bool mcpChanged = !string.Equals(mcp ?? "", snap.Mcp, StringComparison.Ordinal);
+                    bool changed = false;
+                    if (pw != null && mcp != null && pwChanged && !mcpChanged)
+                    {
+                        e.Strings.Set(TokenField, new ProtectedString(true, pw)); changed = true;
+                        Log.Write($"配置条目 {SafeEntryTitle(e)} Password → _mcp_token（前端改 Password）");
+                    }
+                    else if (pw != null && mcp != null && mcpChanged && !pwChanged)
+                    {
+                        e.Strings.Set("Password", new ProtectedString(true, mcp)); changed = true;
+                        Log.Write($"配置条目 {SafeEntryTitle(e)} _mcp_token → Password（Advanced 改 _mcp_token）");
+                    }
+                    else if (pw != null && mcp != null && pwChanged && mcpChanged)
+                    {
+                        e.Strings.Set(TokenField, new ProtectedString(true, pw)); changed = true;
+                        Log.Write($"配置条目 {SafeEntryTitle(e)} 双向冲突：Password 优先");
+                    }
+                    else if (pw != null && mcp == null && mcpChanged)
+                    {
+                        e.Strings.Set(TokenField, new ProtectedString(true, pw)); changed = true;
+                        Log.Write($"配置条目 {SafeEntryTitle(e)} _mcp_token 被清空：Password 填回");
+                    }
+                    // Password 为空 → 不动（保留 _mcp_token 回退路径；用户清空 Password 不破坏鉴权）
+                    if (changed && db != null) db.Modified = true;
+                    TokenSnapshots[key] = new TokenSnapshot { Password = pw ?? "", Mcp = mcp ?? "" };
                 }
                 catch (Exception ex) { Log.Write("SyncTokenFields failed: " + ex.Message); }
             }

@@ -669,19 +669,40 @@ namespace P1Probe.Tools
             FindEntry(db, cfg2Uuid).Strings.Remove("Password");
             Check("p6 ReadToken 移除 Password 后回退 _mcp_token",
                 LibraryConfig.ReadToken(FindEntry(db, cfg2Uuid)) == "second-token");
-            // SyncTokenFields：Password 权威 → _mcp_token 镜像
+            // SyncTokenFields：首次见（重启语义）Password 权威一致化 + 快照记录
             FindEntry(db, cfgUuid).Strings.Set("Password", new ProtectedString(true, "rotated-at-frontend"));
             LibraryConfig.SyncTokenFields(dbs);
-            Check("p6 SyncTokenFields Password 覆盖 _mcp_token",
+            Check("p6 SyncTokenFields 首次见 Password 覆盖 _mcp_token",
                 LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "rotated-at-frontend");
             Check("p6 SyncTokenFields 置库 Modified（同步落盘）", db.Modified == true);
             Check("p6 SyncTokenFields 同步后 ReadToken 取 Password",
                 LibraryConfig.ReadToken(FindEntry(db, cfgUuid)) == "rotated-at-frontend");
-            // Password 为空 → 保留 _mcp_token（回退路径不动）
             FindEntry(db, cfg2Uuid).Strings.Set("_mcp_token", new ProtectedString(true, "keep-me"));
             LibraryConfig.SyncTokenFields(dbs);
             Check("p6 SyncTokenFields 空 Password 保留 _mcp_token",
                 LibraryConfig.ReadMcpField(FindEntry(db, cfg2Uuid), LibraryConfig.TokenField) == "keep-me");
+            // 双向（快照存在后）：改 _mcp_token → Password 跟随
+            FindEntry(db, cfgUuid).Strings.Set("_mcp_token", new ProtectedString(true, "mcp-edit"));
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 双向 _mcp_token → Password",
+                LibraryConfig.ReadToken(FindEntry(db, cfgUuid)) == "mcp-edit"
+                && LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "mcp-edit");
+            // 双向：改 Password → _mcp_token 跟随
+            FindEntry(db, cfgUuid).Strings.Set("Password", new ProtectedString(true, "pw-edit"));
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 双向 Password → _mcp_token",
+                LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "pw-edit");
+            // 冲突：两个字段同时变化 → Password 优先
+            FindEntry(db, cfgUuid).Strings.Set("Password", new ProtectedString(true, "pw-conflict"));
+            FindEntry(db, cfgUuid).Strings.Set("_mcp_token", new ProtectedString(true, "mcp-conflict"));
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 双向冲突 Password 优先",
+                LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "pw-conflict");
+            // _mcp_token 被清空 → Password 填回
+            FindEntry(db, cfgUuid).Strings.Remove("_mcp_token");
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 清空 _mcp_token → Password 填回",
+                LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "pw-conflict");
             var specs = LibraryConfig.CollectListeningSpecs(dbs);
             Check("p6 CollectListeningSpecs 并集",
                 specs.Count == 3 && specs.Contains("127.0.0.1:7000") && specs.Contains("0.0.0.0:7001")
