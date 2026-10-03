@@ -278,6 +278,8 @@ ping                              → {}
 - **P7-1（提交 5d14d91）注入实测**：UI Timer(500ms) 扫描打开条目编辑表单 → `_mcp_config=1` 条目反射注入 tab（`PwEntryForm.m_tabMain` 私有 TabControl）→ 引用集合防重复 + FormClosed 移除；EntrySaved 钩子 → SaveToEntry 写回 + MarkDatabaseModified + RefreshToken（点 OK 才生效，取消不污染条目）；失败仅日志降级不影响 MCP 服务
 - **P7-2（提交 057073d）配置页**：McpConfigUserControl——服务开关/监听地址（`;` 多地址）、token 明文编辑 + 重新生成（CSPRNG 32B hex 64 位，双写 Password+`_mcp_token`）、九 default 三态（允许/拒绝/未设置走聚合）、scope_self；动态复选框文字；布局 AutoSize 自适应列（DPI 缩放无溢出）、标签冒号垂直居中、按钮与开关等宽
 - **已知 UI 语义**：三态"取消勾选"需点到红色（拒绝）；灰色=未设置走聚合/默认——用户可能停在灰色误以为已拒绝
+
+**线协议补充（真实客户端实测反馈，提交 26c6cc5）**：① 响应头 `application/json; charset=utf-8`（中文乱码根因，PS5.1 无 charset 按 Latin-1 解码）；② **无会话（stateless）**——initialize 后无需 notifications/initialized 与会话头；③ `list_entries` 支持 `recursive=true` 全库平铺（每条带 `group_path`，客户端按路径聚合；`keepass://entries` 资源 URI 同为递归全量）；④ DTO 新增 `is_config_entry` 非敏感标志（配置条目整条目掩码同时可编程识别）；⑤ README「Client contract」小节 + 引荐 `tools/e2e_http_check.py` 为参考客户端。探针 242/242。
 **技术确认点（实施第一步）**：`PwEntry.CustomData` API 可用性实测（P6-1 完成：读写/不可见/持久/读出口全绿，但 P6-3 后配置值改用字符串字段，CustomData 仅作参考）；EntryForm 动态注入实测（真实打开 Add Entry 验证 tab 出现）。静态探测已确认（P0Probe.EntryForm）：KeePass 2.60 `KeePass.Forms.PwEntryForm` public、`m_tabMain`(TabControl) 存在、官方事件 `EntrySaving`/`EntrySaved`、MainForm 库生命周期事件 `FileOpened/FileClosed/FileSavingPre` 可用
 
 ---
