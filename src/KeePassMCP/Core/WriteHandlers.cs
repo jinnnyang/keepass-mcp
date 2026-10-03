@@ -400,6 +400,48 @@ namespace KeePassMCP.Core
             });
         }
 
+        // ================= save_database（显式落盘；_mcp_save_default 权限，P6-3l 增补） =================
+        /// <summary>显式保存指定库：dry-run 预览（不落盘）；执行 = 保存前整库快照 → 落盘 → 审计。
+        /// 快照跟随 Save 授权（不单独卡 Backup 位——保存是明确动作，快照是其前置保护）；
+        /// 快照失败不阻止保存（backup_id=null 记警告），空库保存无回滚风险。</summary>
+        public static Dictionary<string, object> SaveDatabase(PwDatabase db, IEnumerable<PwDatabase> dbs,
+            bool dryRun, Func<bool> saveAction)
+        {
+            var denied = RequirePermission(db, null, LibraryConfig.MCPPermission.Save, "save_database", dbs);
+            if (denied != null) return denied;
+            bool hasChanges = db.Modified;
+            if (dryRun)
+                return ToolHandlers.Ok(new Dictionary<string, object>
+                {
+                    ["dry_run"] = true,
+                    ["database"] = SafeName(db),
+                    ["modified"] = hasChanges,
+                    ["snapshot_planned"] = true,
+                    ["summary"] = "保存前将对整库生成非保护字段快照；dry_run=true 不落盘"
+                });
+            string backupId = null;
+            try
+            {
+                string snapshotPath = BackupStore.SnapshotDatabase(db, "save_database");
+                backupId = snapshotPath == null ? null : System.IO.Path.GetFileNameWithoutExtension(snapshotPath);
+                if (backupId == null)
+                    Log.Write("save_database: 整库快照未生成（可能空库），保存将继续但无回滚保护");
+            }
+            catch (Exception ex) { Log.Write("save_database 快照失败（继续保存）: " + ex.Message); }
+            bool saved = saveAction();
+            if (!saved) return ToolHandlers.Err("save_failed", "数据库保存失败（详见日志）");
+            AuditLog.Write("save_database",
+                new Dictionary<string, object> { ["database"] = SafeName(db), ["backup_id"] = backupId, ["modified"] = hasChanges },
+                SafeName(db), true, null, false);
+            return ToolHandlers.Ok(new Dictionary<string, object>
+            {
+                ["saved"] = true,
+                ["backup_id"] = backupId,
+                ["modified"] = hasChanges,
+                ["created"] = DateTime.UtcNow.ToString("o")
+            });
+        }
+
         // ================= restore_backup（破坏性，confirm 硬约束 + Write 权限 + backupId 白名单 + 逐条目 Write 闸门；仅恢复非保护字段） =================
         /// <summary>backupId 白名单（评审 H1）：仅 {17位时间戳}_{工具名}_{8hex}，天然拒绝 `..`/路径分隔符。</summary>
         private static readonly System.Text.RegularExpressions.Regex BackupIdPattern =

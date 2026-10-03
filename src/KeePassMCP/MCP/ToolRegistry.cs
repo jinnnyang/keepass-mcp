@@ -241,7 +241,12 @@ namespace KeePassMCP.MCP
                 {
                     ["database_id"] = StrSchema("库 id"), ["backup_id"] = StrSchema("备份 id（backup_database 返回）"),
                     ["confirm"] = BoolSchema("必须为 true 才执行"), ["dry_run"] = BoolSchema("只返回变更预览，不落库")
-                }, new List<string> { "database_id", "backup_id", "confirm" })
+                }, new List<string> { "database_id", "backup_id", "confirm" }),
+                WriteDef("save_database", "将指定库内存改动显式落盘保存（P6-3l；需配置条目 _mcp_save_default=1，默认拒绝；保存前生成整库非保护字段快照供回滚）",
+                    new Dictionary<string, object>
+                {
+                    ["database_id"] = StrSchema("库 id"), ["dry_run"] = BoolSchema("只返回保存预览，不落盘")
+                }, new List<string> { "database_id" })
             };
             return defs;
         }
@@ -328,6 +333,10 @@ namespace KeePassMCP.MCP
                     return UiWrite(facade, () => ResolveOpenDb(facade, args, out var re, out var rdb) ? re :
                         WriteHandlers.RestoreBackup(rdb, dbs, Str(args, "backup_id"),
                             OptBool(args, "confirm") ?? false, OptBool(args, "dry_run") ?? false, extraMasked));
+                case "save_database":
+                    return UiWrite(facade, () => ResolveOpenDb(facade, args, out var se, out var sdb) ? se :
+                        WriteHandlers.SaveDatabase(sdb, dbs, OptBool(args, "dry_run") ?? false,
+                            () => facade.SaveDatabase(sdb)));
 
                 default:
                     return ToolHandlers.Err("unknown_tool", $"工具 {toolName} 不存在");

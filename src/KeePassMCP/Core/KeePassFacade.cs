@@ -52,5 +52,41 @@ namespace KeePassMCP.Core
                 }
             });
         }
+
+        /// <summary>保存指定库落盘（P6-3l save_database：DocumentManager.SaveDatabase 反射调用，UI 线程）。
+        /// KeePass 2.60 签名兼容：优先 SaveDatabase(PwDatabase, SaveFlags)，回退 SaveDatabase(PwDatabase)。</summary>
+        public bool SaveDatabase(PwDatabase db)
+        {
+            return UiInvoke(() =>
+            {
+                try
+                {
+                    var dm = _mainWindow.DocumentManager;
+                    if (dm == null) return false;
+                    var methods = dm.GetType().GetMethods()
+                        .Where(m => m.Name == "SaveDatabase").ToList();
+                    foreach (var m in methods)
+                    {
+                        var ps = m.GetParameters();
+                        if (ps.Length == 2 && ps[0].ParameterType == typeof(PwDatabase)
+                            && ps[1].ParameterType.IsEnum)
+                        {
+                            object flags = Enum.ToObject(ps[1].ParameterType, 0);
+                            return (bool)m.Invoke(dm, new object[] { db, flags });
+                        }
+                    }
+                    var single = methods.FirstOrDefault(m =>
+                        m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(PwDatabase));
+                    if (single != null) return (bool)single.Invoke(dm, new object[] { db });
+                    Log.Write("SaveDatabase: 未找到兼容签名");
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Log.Write("SaveDatabase failed: " + ex.Message);
+                    return false;
+                }
+            });
+        }
     }
 }

@@ -24,6 +24,7 @@
 | `_mcp_list_default` | `1` | 默认允许条目出现在客户端查询列表（0 = 全局隐身） |
 | `_mcp_audit_default` | `0` | `1` 才允许客户端读 get_audit_log（2026-10-03 增补，评审 M3） |
 | `_mcp_backup_default` | `0` | `1` 才允许触发 backup_database（2026-10-03 增补，评审 M6） |
+| `_mcp_save_default` | `0` | `1` 才允许 save_database 显式落盘（2026-10-03 增补，P6-3l；保存前生成整库非保护字段快照供回滚） |
 
 库内无任何配置条目时，插件自动创建 `MCPServerConfiguration` 条目并写入默认参数（监听 `127.0.0.1:6789`、随机 token、上表默认值）。
 

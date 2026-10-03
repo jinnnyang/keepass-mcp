@@ -262,7 +262,7 @@ ping                              → {}
 - 鉴权 = token 双字段（2026-10-03）：**Password 为权威输入框**（KeePass 前端直接编辑，原生保护字段）+ `_mcp_token` 为同步镜像（读取 Password 非空优先、空回退 `_mcp_token`；保存/打开后 SyncTokenFields 用 Password 覆盖 `_mcp_token`）；并集（`;` 分隔，任一匹配放行；并集为空 → 无鉴权，仅回环）
 - 作用域 = `_mcp_scope_self=1` 条目不并入全局 token/监听/default 聚合（防共享库配置漂移，评审 M5 增补）
 - 权限 = 六权限（Read/ReadProtected/Write/WriteProtected/Move/List）+ 审计/快照两个全局位；判定优先级：**条目显式字段 → 生效配置条目 default 布尔最严聚合（顺序无关，任一 0 即拒）→ 硬编码默认**（评审 H5 定稿）
-- 配置条目 default 字段：`_mcp_read_default=1` / `_mcp_read_protected_default=0` / `_mcp_write_default=1` / `_mcp_write_protected_default=0` / `_mcp_move_default=1` / `_mcp_list_default=1` / `_mcp_audit_default=0` / `_mcp_backup_default=0`（后两者评审 M3/M6 增补：审计读与整库快照默认拒绝）
+- 配置条目 default 字段：`_mcp_read_default=1` / `_mcp_read_protected_default=0` / `_mcp_write_default=1` / `_mcp_write_protected_default=0` / `_mcp_move_default=1` / `_mcp_list_default=1` / `_mcp_audit_default=0` / `_mcp_backup_default=0` / `_mcp_save_default=0`（审计读/整库快照/显式落盘默认拒绝——M3/M6/P6-3l）
 - 普通条目权限字段：`_mcp_read` / `_mcp_read_protected` / `_mcp_write` / `_mcp_write_protected` / `_mcp_move` / `_mcp_list`（`1`=允许 `0`=显式拒绝；`_mcp_list=0` 对客户端隐身）；create/update 拒绝 `_mcp_` 前缀字段（reserved_field，防自授权）
 - 无任何配置条目 → 自动创建 `MCPServerConfiguration`（默认回环 + 随机 32B token + 上表默认；端口占用自动 +1）
 - restore_backup 双闸门（评审 H1/H2 修复）：backupId 白名单正则拒绝路径遍历；恢复循环逐条目 Write 判定，锁定条目标记 restore_skip

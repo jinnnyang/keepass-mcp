@@ -867,6 +867,30 @@ namespace P1Probe.Tools
             // 工具级 Backup 权限拒绝：无配置库默认拒绝（评审 M6）
             env = WriteHandlers.BackupDatabase(plainDb, plainDbs);
             Check("p6 backup 无配置库权限拒绝 → permission_denied", !Ok(env) && ErrCode(env) == "permission_denied");
+
+            // ---- 12) save_database（P6-3l：显式落盘，_mcp_save_default 默认拒绝，保存前快照） ----
+            int saveAuditBase = FileCount(ConfigPaths.AuditFile);
+            int saveBackupBase = DirectoryCount(ConfigPaths.BackupsDir);
+            // 默认拒绝：cfg1 无 _mcp_save_default → 硬编码 false
+            env = WriteHandlers.SaveDatabase(db, dbs, false, () => true);
+            Check("p6 save_database 默认拒绝 → permission_denied", !Ok(env) && ErrCode(env) == "permission_denied");
+            // 授权：cfg1 显式 _mcp_save_default=1 → dry-run 预览不落盘不审计
+            FindEntry(db, cfgUuid).Strings.Set("_mcp_save_default", new ProtectedString(false, "1"));
+            env = WriteHandlers.SaveDatabase(db, dbs, true, () => true);
+            Check("p6 save_database dry-run → dry_run 且零副作用", Ok(env)
+                && (bool)((Dictionary<string, object>)env["data"])["dry_run"]
+                && FileCount(ConfigPaths.AuditFile) == saveAuditBase
+                && DirectoryCount(ConfigPaths.BackupsDir) == saveBackupBase);
+            // 执行：保存前快照 + 审计 + backup_id
+            env = WriteHandlers.SaveDatabase(db, dbs, false, () => true);
+            Check("p6 save_database 执行 → ok 含 backup_id 与审计+1 快照+1", Ok(env)
+                && ((Dictionary<string, object>)env["data"]).ContainsKey("backup_id")
+                && FileCount(ConfigPaths.AuditFile) == saveAuditBase + 1
+                && DirectoryCount(ConfigPaths.BackupsDir) == saveBackupBase + 1);
+            // 最严聚合：cfg2 显式 _mcp_save_default=0 → 拒绝（覆盖 cfg1=1）
+            FindEntry(db, cfg2Uuid).Strings.Set("_mcp_save_default", new ProtectedString(false, "0"));
+            env = WriteHandlers.SaveDatabase(db, dbs, false, () => true);
+            Check("p6 save_database 最严聚合（cfg2=0 → 拒绝）", !Ok(env) && ErrCode(env) == "permission_denied");
         }
 
         // ---------- P2 helpers ----------

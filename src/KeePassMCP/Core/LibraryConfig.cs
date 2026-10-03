@@ -35,6 +35,7 @@ namespace KeePassMCP.Core
         public const string ListDefault = "_mcp_list_default";
         public const string AuditDefault = "_mcp_audit_default";       // =1 才允许客户端读 get_audit_log（默认 0，ADR-0003 增补 M3）
         public const string BackupDefault = "_mcp_backup_default";     // =1 才允许触发 backup_database（默认 0，ADR-0003 增补 M6）
+        public const string SaveDefault = "_mcp_save_default";         // =1 才允许 save_database 落盘（默认 0，P6-3l 增补）
 
         // 条目显式权限字段
         public const string ReadField = "_mcp_read";
@@ -184,7 +185,7 @@ namespace KeePassMCP.Core
         }
 
         // ---------- 权限解析（ADR-0003：条目字段 → default 最严聚合 → 硬编码） ----------
-        public enum MCPPermission { Read, ReadProtected, Write, WriteProtected, Move, List, Audit, Backup }
+        public enum MCPPermission { Read, ReadProtected, Write, WriteProtected, Move, List, Audit, Backup, Save }
 
         /// <summary>条目级权限字段（Audit/Backup 仅 default 链，无条目级字段）。</summary>
         public static string PermissionEntryField(MCPPermission p) => p switch
@@ -207,7 +208,8 @@ namespace KeePassMCP.Core
             MCPPermission.Move => MoveDefault,
             MCPPermission.List => ListDefault,
             MCPPermission.Audit => AuditDefault,
-            _ => BackupDefault
+            MCPPermission.Backup => BackupDefault,
+            _ => SaveDefault
         };
 
         /// <summary>硬编码默认（ADR-0003：仅 move/read/write 未保护允许；保护字段与审计/快照一律拒绝）。</summary>
@@ -219,7 +221,6 @@ namespace KeePassMCP.Core
             MCPPermission.List => true,
             _ => false
         };
-
         /// <summary>解析条目在某操作上的权限：条目显式字段 → 生效配置条目 default 布尔最严聚合 → 硬编码默认。
         /// 聚合规则（ADR-0003 语义定稿）：任一配置条目显式值=0 → 拒绝；全部显式值=1 → 允许；
         /// 全部缺失 → 硬编码。顺序无关（scope_self=1 条目不参与）。Audit/Backup 无条目字段，entry 传 null。</summary>
@@ -280,6 +281,7 @@ namespace KeePassMCP.Core
                 entry.Strings.Set(ListDefault, new ProtectedString(false, "1"));
                 entry.Strings.Set(AuditDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(BackupDefault, new ProtectedString(false, "0"));
+                entry.Strings.Set(SaveDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(ScopeSelfField, new ProtectedString(false, "0"));
                 db.RootGroup.AddEntry(entry, true); // 必须显式 AddEntry（P2 教训）
                 db.Modified = true;
