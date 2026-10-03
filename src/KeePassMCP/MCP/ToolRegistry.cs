@@ -347,11 +347,23 @@ namespace KeePassMCP.MCP
 
         // ================= helpers =================
 
-        /// <summary>写操作 marshal 到 UI 线程执行（KeePassLib 非线程安全）。</summary>
+        /// <summary>写操作 marshal 到 UI 线程执行（KeePassLib 非线程安全）；
+        /// 真跑成功后主动刷新主窗体分组树/条目列表（插件直改库绕过 UI 事件，不刷则重开库才显示）。</summary>
         private static Dictionary<string, object> UiWrite(KeePassFacade facade,
             Func<Dictionary<string, object>> body)
         {
-            return facade.UiInvoke(body);
+            return facade.UiInvoke(() =>
+            {
+                var env = body();
+                // 仅"真跑成功"（dry-run 不改库）触发刷新
+                if (env != null && env.TryGetValue("ok", out var okV) && okV is bool okB && okB
+                    && env.TryGetValue("data", out var dataV) && dataV is Dictionary<string, object> data
+                    && data.TryGetValue("executed", out var exV) && exV is bool exB && exB)
+                {
+                    facade.RefreshUiAfterWrite();
+                }
+                return env;
+            });
         }
 
         /// <summary>解析打开的库；失败时 out err 为非空信封。返回值 true=失败。</summary>

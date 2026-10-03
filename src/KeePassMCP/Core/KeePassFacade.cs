@@ -54,6 +54,24 @@ namespace KeePassMCP.Core
             });
         }
 
+        /// <summary>写操作成功后刷新 KeePass 主窗体分组树/条目列表（2026-10-04 实测反馈：
+        /// 插件直改 PwDatabase 绕过 UI 事件，不主动刷则树/列表要到重开库才重绘）。
+        /// 必须在 UI 线程调用（UiWrite 已 marshal）；内部自防御：无主窗/无活动库/异常均静默降级。</summary>
+        public void RefreshUiAfterWrite()
+        {
+            try
+            {
+                var dm = _mainWindow?.DocumentManager;
+                if (dm == null) return;
+                var doc = dm.ActiveDocument; // PwDocument；无活动库时为 null → UpdateUI 内部自适配
+                _mainWindow.UpdateUI(true, doc, true, null, false, null, false);
+            }
+            catch (Exception ex)
+            {
+                Log.Write("RefreshUiAfterWrite: " + ex.Message);
+            }
+        }
+
         /// <summary>保存指定库落盘（P6-3l save_database）。KeePass 2.60 DocumentManager 无公开 SaveDatabase，
         /// 故在 DocumentManager/MainForm（含非公开）上搜索保存类方法（SaveDatabase/SaveDatabaseAs/SaveDatabases/Save），
         /// 匹配首参为 PwDatabase 的重载（其余参数填类型默认值），void 返回视为成功；无 p0=PwDatabase 时
