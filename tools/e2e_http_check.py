@@ -165,6 +165,16 @@ def main():
     check("get_audit_log 默认拒绝（permission_denied）", not ok and code == "permission_denied",
           "code=%s" % code)
 
+    # 9) save_database（P6-3l）：dry-run 必测；真实保存需 E2E_SAVE_REAL=1 才执行（回归默认零副作用）
+    ok, data, err = call_tool("save_database", {"database_id": db_id, "dry_run": True}, token)
+    check("save_database dry-run → 预览且不落盘",
+          ok and data.get("dry_run") is True and data.get("snapshot_planned") is True,
+          "err=%s" % err)
+    if os.environ.get("E2E_SAVE_REAL") == "1":
+        ok, data, err = call_tool("save_database", {"database_id": db_id}, token)
+        check("save_database 真实保存 → saved + backup_id",
+              ok and data.get("saved") is True and bool(data.get("backup_id")), "err=%s" % err)
+
     # 9) 全库无配置条目时 default 拒绝 → 已验证；此处收尾
     print("\n=== 结果：%d 通过 / %d 失败 ===" % (len(PASS), len(FAIL)))
     if FAIL:
