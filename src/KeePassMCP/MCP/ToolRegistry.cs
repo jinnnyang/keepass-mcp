@@ -52,7 +52,7 @@ namespace KeePassMCP.MCP
                 new Dictionary<string, object>
                 {
                     ["name"] = "list_entries",
-                    ["description"] = "列出分组下的条目摘要（不含受保护字段值）；缺省 group_uuid 时列出根组直接条目",
+                    ["description"] = "列出分组下的条目摘要（不含受保护字段值）；缺省 group_uuid 时列出根组直接条目；recursive=true 列出该组及全部子组条目（每条带 group_path）",
                     ["inputSchema"] = new Dictionary<string, object>
                     {
                         ["type"] = "object",
@@ -62,6 +62,8 @@ namespace KeePassMCP.MCP
                             { ["type"] = "string", ["description"] = "库 id" },
                             ["group_uuid"] = new Dictionary<string, object>
                             { ["type"] = "string", ["description"] = "可选：分组 uuid" },
+                            ["recursive"] = new Dictionary<string, object>
+                            { ["type"] = "boolean", ["description"] = "可选：true=递归列出该组及全部子组条目（每条带 group_path），默认 false" },
                             ["limit"] = new Dictionary<string, object>
                             { ["type"] = "integer", ["description"] = "可选：最多返回条数" }
                         },
@@ -267,7 +269,7 @@ namespace KeePassMCP.MCP
                     return ToolHandlers.ListGroups(dbs, Str(args, "database_id"), OptStr(args, "parent_uuid"));
                 case "list_entries":
                     return ToolHandlers.ListEntries(dbs, Str(args, "database_id"), OptStr(args, "group_uuid"),
-                        OptInt(args, "limit"), extraMasked);
+                        OptBool(args, "recursive") ?? false, OptInt(args, "limit"), extraMasked);
                 case "get_entry":
                     return ToolHandlers.GetEntry(dbs, Str(args, "database_id"), Str(args, "entry_uuid"), extraMasked);
                 case "search_entries":

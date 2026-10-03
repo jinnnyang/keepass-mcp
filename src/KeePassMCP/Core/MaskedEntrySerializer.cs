@@ -31,7 +31,8 @@ namespace KeePassMCP.Core
                     modified = entry.LastModificationTime.ToString("o"),
                     custom_fields = new Dictionary<string, string>(),
                     protected_field_names = new List<string> { "*" },
-                    protected_fields = new Dictionary<string, string>()
+                    protected_fields = new Dictionary<string, string>(),
+                    is_config_entry = LibraryConfig.IsConfigEntry(entry)
                 };
             }
             var dto = new EntryDto
@@ -84,7 +85,8 @@ namespace KeePassMCP.Core
                     username = "",
                     tags = entry.Tags != null ? entry.Tags.ToList() : new List<string>(),
                     group_path = BuildGroupPath(entry.ParentGroup),
-                    protected_field_names = new List<string> { "*" }
+                    protected_field_names = new List<string> { "*" },
+                    is_config_entry = LibraryConfig.IsConfigEntry(entry)
                 };
             }
             var dto = new EntrySummaryDto

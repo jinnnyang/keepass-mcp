@@ -100,7 +100,7 @@ namespace KeePassMCP.Core
 
         // ---------- list_entries ----------
         public static Dictionary<string, object> ListEntries(List<PwDatabase> dbs, string databaseId,
-            string groupUuid, int? limit, ISet<string> extraMasked)
+            string groupUuid, bool recursive, int? limit, ISet<string> extraMasked)
         {
             PwDatabase database = RequireOpenDb(dbs, databaseId);
             if (database == null) return LastError;
@@ -115,16 +115,34 @@ namespace KeePassMCP.Core
             }
 
             var list = new List<EntrySummaryDto>();
-            foreach (PwEntry entry in group.Entries)
+            // recursive=false（默认）：仅目标分组的直接条目；recursive=true：组内 + 全部子组（每条带其 group_path，客户端按路径聚合）
+            if (recursive)
+                CollectEntriesRecursive(group, dbs, extraMasked, list);
+            else
             {
-                // ADR-0003：_mcp_list=0 隐身（过滤）；_mcp_read=0 内容隐藏（仅 uuid/标签/路径）
-                if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs)) continue;
-                bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
-                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked, !canRead));
+                foreach (PwEntry entry in group.Entries)
+                {
+                    // ADR-0003：_mcp_list=0 隐身（过滤）；_mcp_read=0 内容隐藏（仅 uuid/标签/路径）
+                    if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs)) continue;
+                    bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
+                    list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked, !canRead));
+                }
             }
             if (limit.HasValue && limit.Value > 0 && list.Count > limit.Value)
                 list = list.Take(limit.Value).ToList();
             return Ok(list);
+        }
+
+        private static void CollectEntriesRecursive(PwGroup group, List<PwDatabase> dbs,
+            ISet<string> extraMasked, List<EntrySummaryDto> list)
+        {
+            foreach (PwEntry entry in group.Entries)
+            {
+                if (!LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.List, dbs)) continue;
+                bool canRead = LibraryConfig.ResolvePermission(entry, LibraryConfig.MCPPermission.Read, dbs);
+                list.Add(MaskedEntrySerializer.ToSummary(entry, extraMasked, !canRead));
+            }
+            foreach (PwGroup sub in group.Groups) CollectEntriesRecursive(sub, dbs, extraMasked, list);
         }
 
         // ---------- get_entry ----------

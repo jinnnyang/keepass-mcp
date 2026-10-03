@@ -58,7 +58,7 @@ namespace KeePassMCP.MCP
                 return ToolHandlers.Err("database_locked", "数据库已锁定");
 
             if (path == "groups") return ToolHandlers.ListGroups(dbs, dbId, null);
-            if (path == "entries") return ToolHandlers.ListEntries(dbs, dbId, null, null, extraMasked);
+            if (path == "entries") return ToolHandlers.ListEntries(dbs, dbId, null, true, null, extraMasked);
             if (path.StartsWith("entries/", StringComparison.OrdinalIgnoreCase))
                 return ToolHandlers.GetEntry(dbs, dbId, path.Substring("entries/".Length), extraMasked);
             return ToolHandlers.Err("invalid_resource_uri", $"URI 路径不支持：{path}");

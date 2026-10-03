@@ -33,6 +33,7 @@ namespace KeePassMCP.Core
         public string group_path { get; set; }
         public List<string> tags { get; set; }
         public List<string> protected_field_names { get; set; }
+        public bool is_config_entry { get; set; }   // 非敏感：仅暴露"此条目是 MCP 配置条目"事实，不泄露内容
     }
 
     /// <summary>get_entry 完整条目 DTO。</summary>
@@ -50,5 +51,6 @@ namespace KeePassMCP.Core
         public Dictionary<string, string> protected_fields { get; set; }
         public string created { get; set; }
         public string modified { get; set; }
+        public bool is_config_entry { get; set; }   // 非敏感：仅暴露"此条目是 MCP 配置条目"事实，不泄露内容
     }
 }

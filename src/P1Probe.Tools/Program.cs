@@ -124,7 +124,7 @@ namespace P1Probe.Tools
         private static void RunListEntries(List<PwDatabase> dbs, ISet<string> extra)
         {
             string workUuid = GetGroupUuid(dbs[0], "Work");
-            var env = ToolHandlers.ListEntries(dbs, DbId, workUuid, null, extra);
+            var env = ToolHandlers.ListEntries(dbs, DbId, workUuid, false, null, extra);
             Check("list_entries ok", (bool)env["ok"]);
             string json = JsonSerializer.Serialize(env);
             Check("list_entries 无明文", !json.Contains("super-secret-123") && !json.Contains("ghp_abc123"));
@@ -139,6 +139,20 @@ namespace P1Probe.Tools
                 var masked = e0.GetProperty("protected_field_names").EnumerateArray()
                     .Select(x => x.GetString()).OrderBy(x => x).ToList();
                 Check("保护字段 APIKey,Password", string.Join(",", masked) == "APIKey,Password");
+                Check("普通条目 is_config_entry=false", !e0.GetProperty("is_config_entry").GetBoolean());
+            }
+            // recursive=true：全库平铺（含子组条目，每条带 group_path）
+            var rec = ToolHandlers.ListEntries(dbs, DbId, null, true, null, extra);
+            string recJson = JsonSerializer.Serialize(rec);
+            Check("recursive 无明文", !recJson.Contains("super-secret-123") && !recJson.Contains("ghp_abc123"));
+            using (JsonDocument doc = JsonDocument.Parse(recJson))
+            {
+                var arr = doc.RootElement.GetProperty("data");
+                Check("recursive 全库条目数=2", arr.GetArrayLength() == 2);
+                var paths = arr.EnumerateArray().Select(x => x.GetProperty("group_path").GetString()).ToList();
+                Check("recursive 每条带真实路径",
+                    paths.All(p => p.EndsWith("/Work") || p.EndsWith("/Personal"))
+                    && paths.Any(p => p.EndsWith("/Work")) && paths.Any(p => p.EndsWith("/Personal")));
             }
         }
 
@@ -464,7 +478,7 @@ namespace P1Probe.Tools
             FindEntry(db, apiUuid).Strings.Set("_mcp_list", new ProtectedString(false, "0"));
             env = SecretHandlers.ReadSecret(db, apiUuid, null);
             Check("p3 read_secret 隐身条目 → entry_not_found", !Ok(env) && ErrCode(env) == "entry_not_found");
-            var listAfterHidden = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Work"), null, extra);
+            var listAfterHidden = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Work"), false, null, extra);
             Check("p3 隐身条目不出现在列表", !JsonSerializer.Serialize(listAfterHidden).Contains(apiUuid));
             FindEntry(db, apiUuid).Strings.Remove("_mcp_list");
             FindEntry(db, apiUuid).Strings.Remove("_mcp_read_protected");
@@ -851,9 +865,9 @@ namespace P1Probe.Tools
 
             // ---- 10) 权限全链路：隐身过滤 + 内容隐藏 ----
             // Mailbox _mcp_list=0 → 列表不可见；GitHub API 正常可见
-            var listed = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Personal"), null, extra);
+            var listed = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Personal"), false, null, extra);
             Check("p6 list_entries 隐身条目过滤", !JsonSerializer.Serialize(listed).Contains(mailUuid));
-            var listedWork = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Work"), null, extra);
+            var listedWork = ToolHandlers.ListEntries(dbs, DbId, GetGroupUuid(db, "Work"), false, null, extra);
             Check("p6 list_entries 可见条目在", JsonSerializer.Serialize(listedWork).Contains(apiUuid));
             // get_entry 隐身 → entry_not_found
             var hiddenGet = ToolHandlers.GetEntry(dbs, DbId, mailUuid, extra);

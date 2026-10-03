@@ -134,7 +134,25 @@ mcp_servers:
 }
 ```
 
-**通用要点**：KeePassMCP 是 Streamable HTTP（非 stdio、非 SSE），任何支持 MCP HTTP transport 的客户端都能连；端口每次启动可能变化，token 每次启动持久不变（在 `token` 文件），建议客户端用 `connection.json` 里的最新值或脚本动态注入。
+**通用要点**：KeePassMCP 是 Streamable HTTP（非 stdio、非 SSE），任何支持 MCP HTTP transport 的客户端都能连；端口每次启动可能变化，token 每次启动持久不变（在库内配置条目，`connection.json` 同步最新值），建议客户端用 `connection.json` 里的最新值或脚本动态注入。
+
+> **参考客户端实现**：`tools/e2e_http_check.py` 已完整实现握手、信封解析、掩码断言——新客户端接入以此为准，比从零写可靠。
+
+## Client contract（客户端接入契约）
+
+- **无会话（stateless）**：本服务不维护 MCP 会话——`initialize` 握手后**无需** `notifications/initialized`、无需回传 `Mcp-Session-Id` 头，直接 POST + `Authorization: Bearer` 即可（2025-06-18 协议允许 stateless 实现）。重复握手无害但多余。
+- **信封语义**（JSON-RPC 响应 `result.content[0].text` 内嵌 JSON，`ok` / `error`）：
+
+| 现象 | 含义 |
+|---|---|
+| HTTP 200 + `result` + `content[0].text` 内 `ok=true` | 工具成功 |
+| HTTP 200 + `result` + `isError=true`，text 内 `ok=false` + `error.code` | 工具业务失败（权限/未找到/锁定等） |
+| HTTP 401 / 403 | token 无效 / Host 不在白名单（鉴权层） |
+| HTTP 405 / 413 / 其他 | 协议层失败（方法不支持/请求过大） |
+
+- **响应头声明 UTF-8**：所有响应 `Content-Type: application/json; charset=utf-8`，客户端按 UTF-8 解码（勿按 Latin-1）。
+- **list_entries**：缺省 `group_uuid` 返回根组直接条目；`recursive=true` 全库平铺（含全部子组条目，每条带 `group_path` 供聚合）。
+- **配置条目**：读出口整条目掩码（`title=[protected]`、`protected_field_names=["*"]`），同时携带非敏感标志 `is_config_entry=true`，客户端可编程跳过/标注。
 
 命令行快速验证（PowerShell）：
 

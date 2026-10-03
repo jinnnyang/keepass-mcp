@@ -337,7 +337,7 @@ namespace KeePassMCP.MCP
             }
             byte[] bytes = Encoding.UTF8.GetBytes(response);
             ctx.Response.StatusCode = 200;
-            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentType = "application/json; charset=utf-8";
             ctx.Response.ContentLength64 = bytes.Length;
             ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
         }
@@ -362,7 +362,7 @@ namespace KeePassMCP.MCP
                 if (json == null) { ctx.Response.StatusCode = status; return; }
                 byte[] bytes = Encoding.UTF8.GetBytes(json);
                 ctx.Response.StatusCode = status;
-                ctx.Response.ContentType = "application/json";
+                ctx.Response.ContentType = "application/json; charset=utf-8";
                 ctx.Response.ContentLength64 = bytes.Length;
                 ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
             }
