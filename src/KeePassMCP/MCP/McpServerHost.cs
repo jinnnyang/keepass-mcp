@@ -101,6 +101,10 @@ namespace KeePassMCP.MCP
             }
             catch (Exception ex) { Log.Write("ResolveServerEnabled failed: " + ex.Message); }
 
+            // 2026-10-03：token 双字段同步（Password 权威 → _mcp_token 镜像），库打开/保存后执行
+            try { LibraryConfig.SyncTokenFields(_facade.GetDatabases()); }
+            catch (Exception ex) { Log.Write("SyncTokenFields failed: " + ex.Message); }
+
             var nextTokens = ResolveTokens();
             var nextSpecs = ResolveListeningSpecs();
             bool changed = !SameList(nextTokens, _activeTokens) || !SameList(nextSpecs, _listeningSpecs);

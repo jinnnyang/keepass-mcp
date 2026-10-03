@@ -659,6 +659,28 @@ namespace P1Probe.Tools
                 tokens.Count == 3 && tokens.Contains("lib-token-xyz") && tokens.Contains("lib-token-abc")
                 && tokens.Contains("second-token"));
             Check("p6 CollectTokens 排除 scope_self 条目", !tokens.Contains("scoped-token-1"));
+            // ReadToken 绑定语义（2026-10-03）：Password 非空优先；空回退 _mcp_token；并存时 Password 优先
+            Check("p6 ReadToken Password 非空优先",
+                LibraryConfig.ReadToken(FindEntry(db, cfgUuid)) == "lib-token-xyz;lib-token-abc");
+            Check("p6 ReadToken 空 Password 回退 _mcp_token",
+                LibraryConfig.ReadToken(FindEntry(db, cfg2Uuid)) == "second-token");
+            FindEntry(db, cfg2Uuid).Strings.Set("Password", new ProtectedString(true, "pw-token-2"));
+            Check("p6 ReadToken 并存时 Password 优先", LibraryConfig.ReadToken(FindEntry(db, cfg2Uuid)) == "pw-token-2");
+            FindEntry(db, cfg2Uuid).Strings.Remove("Password");
+            Check("p6 ReadToken 移除 Password 后回退 _mcp_token",
+                LibraryConfig.ReadToken(FindEntry(db, cfg2Uuid)) == "second-token");
+            // SyncTokenFields：Password 权威 → _mcp_token 镜像
+            FindEntry(db, cfgUuid).Strings.Set("Password", new ProtectedString(true, "rotated-at-frontend"));
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 SyncTokenFields Password 覆盖 _mcp_token",
+                LibraryConfig.ReadMcpField(FindEntry(db, cfgUuid), LibraryConfig.TokenField) == "rotated-at-frontend");
+            Check("p6 SyncTokenFields 同步后 ReadToken 取 Password",
+                LibraryConfig.ReadToken(FindEntry(db, cfgUuid)) == "rotated-at-frontend");
+            // Password 为空 → 保留 _mcp_token（回退路径不动）
+            FindEntry(db, cfg2Uuid).Strings.Set("_mcp_token", new ProtectedString(true, "keep-me"));
+            LibraryConfig.SyncTokenFields(dbs);
+            Check("p6 SyncTokenFields 空 Password 保留 _mcp_token",
+                LibraryConfig.ReadMcpField(FindEntry(db, cfg2Uuid), LibraryConfig.TokenField) == "keep-me");
             var specs = LibraryConfig.CollectListeningSpecs(dbs);
             Check("p6 CollectListeningSpecs 并集",
                 specs.Count == 3 && specs.Contains("127.0.0.1:7000") && specs.Contains("0.0.0.0:7001")
@@ -774,9 +796,12 @@ namespace P1Probe.Tools
                 created != null && LibraryConfig.IsConfigEntry(created) && LibraryConfig.IsServerEnabled(created));
             Check("p6 默认条目监听默认",
                 created != null && LibraryConfig.ReadMcpField(created, LibraryConfig.ListeningField) == LibraryConfig.DefaultListening);
-            Check("p6 默认条目 token 非空保护",
-                created != null && LibraryConfig.ReadMcpField(created, LibraryConfig.TokenField) != null
-                && created.Strings.Get(LibraryConfig.TokenField).IsProtected);
+            Check("p6 默认条目 token 非空保护（Password 绑定）",
+                created != null && LibraryConfig.ReadToken(created) != null
+                && created.Strings.Get("Password").IsProtected);
+            Check("p6 默认条目 _mcp_token 镜像同步",
+                created != null && LibraryConfig.ReadMcpField(created, LibraryConfig.TokenField)
+                == LibraryConfig.ReadToken(created));
             Check("p6 默认条目 default 权限齐备",
                 created != null
                 && LibraryConfig.ReadMcpField(created, LibraryConfig.ReadDefault) == "1"
@@ -958,7 +983,8 @@ namespace P1Probe.Tools
             cfg.Strings.Set("_mcp_config", new ProtectedString(false, "1"));
             cfg.Strings.Set("_mcp_server", new ProtectedString(false, "1"));
             cfg.Strings.Set("_mcp_listening", new ProtectedString(false, "127.0.0.1:7000;0.0.0.0:7001"));
-            cfg.Strings.Set("_mcp_token", new ProtectedString(true, "lib-token-xyz;lib-token-abc"));
+            // 2026-10-03：token 绑定 Password 输入框（新范式：Password 非空优先；cfg2 走 _mcp_token 回退路径）
+            cfg.Strings.Set("Password", new ProtectedString(true, "lib-token-xyz;lib-token-abc"));
             cfg.Strings.Set("_mcp_read_default", new ProtectedString(false, "1"));
             cfg.Strings.Set("_mcp_read_protected_default", new ProtectedString(false, "0"));
             cfg.Strings.Set("_mcp_write_default", new ProtectedString(false, "1"));

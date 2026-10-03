@@ -14,7 +14,7 @@
 |---|---|---|
 | `_mcp_server` | `1` | 启用监听；**全部生效配置条目为 `0` 时服务停止且不启动**（2026-10-03 定稿：`_mcp_server=0` 即停用，字段名与语义必须一致） |
 | `_mcp_listening` | `127.0.0.1:6789` | 监听地址端口；`;` 分隔多地址；端口占用自动 +1 重试 |
-| `_mcp_token` | 随机 32B hex | 鉴权 token 并集（`;` 分隔），任一匹配即放行；并集为空 → 取消鉴权（回环限定下开放） |
+| `_mcp_token` | 随机 32B hex | 鉴权 token 并集（`;` 分隔），任一匹配即放行；并集为空 → 取消鉴权（回环限定下开放）。**2026-10-03 起为 Password 的同步镜像**（双字段绑定：Password 为权威输入框，`_mcp_token` 保持与其一致，见下方"token 双字段绑定"） |
 | `_mcp_scope_self` | `0` | `1` = 该配置条目不并入全局 token/监听/default 聚合（保留为所属库按库路由预留；防共享库配置漂移） |
 | `_mcp_read_default` | `1` | 默认允许读未保护字段 |
 | `_mcp_read_protected_default` | `0` | 默认拒绝读保护字段 |
@@ -26,6 +26,15 @@
 | `_mcp_backup_default` | `0` | `1` 才允许触发 backup_database（2026-10-03 增补，评审 M6） |
 
 库内无任何配置条目时，插件自动创建 `MCPServerConfiguration` 条目并写入默认参数（监听 `127.0.0.1:6789`、随机 token、上表默认值）。
+
+### token 双字段绑定（2026-10-03 增补）
+
+用户在前端（KeePass 条目编辑界面的 **Password 输入框**）直接查看/修改鉴权 token：
+
+- **读取（`ReadToken`）**：Password 非空 → 用之（用户编辑 Password 即生效；Password 为 KeePass 原生保护字段，消除"忘勾保护"风险）；Password 为空 → 回退 `_mcp_token`（兼容绑定前自动创建的旧条目）
+- **同步（`SyncTokenFields`，FileOpened/FileSaved 刷新链路内）**：Password 非空且与 `_mcp_token` 不一致 → 用 Password 覆盖 `_mcp_token`（Password 权威、`_mcp_token` 镜像）；Password 为空 → 保留 `_mcp_token` 不动
+- **创建（`EnsureDefaultConfig`）**：Password 与 `_mcp_token` 同时写入相同随机值
+- 语义声明：修改 token 请编辑 Password 输入框；在 Advanced 页直接改 `_mcp_token` 会在下次同步时被 Password 覆盖
 
 ### 普通条目权限字段（显式，优先级高于 default）
 

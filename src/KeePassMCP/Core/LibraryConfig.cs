@@ -107,6 +107,17 @@ namespace KeePassMCP.Core
             }
         }
 
+        /// <summary>读取配置条目 token（2026-10-03 需求：token 绑定 Password 输入框，双字段同步）：
+        /// Password 字段非空 → 用之（用户编辑 Password 即生效，且 Password 天然保护字段）；
+        /// Password 为空 → 回退 _mcp_token（兼容自动创建前的旧条目）。</summary>
+        public static string ReadToken(PwEntry entry)
+        {
+            if (entry == null || entry.Strings == null) return null;
+            string pw = ReadPasswordValue(entry);
+            if (pw != null) return pw;
+            return ReadMcpField(entry, TokenField);
+        }
+
         private static bool IsFlagTrue(string v) =>
             !string.IsNullOrWhiteSpace(v) && (v.Trim() == "1" || v.Trim().Equals("true", StringComparison.OrdinalIgnoreCase));
 
@@ -137,13 +148,14 @@ namespace KeePassMCP.Core
             FindConfigEntries(dbs).Count > 0;
 
         // ---------- 鉴权：token 并集 ----------
-        /// <summary>生效配置条目 _mcp_token 并集（`;` 拆分、去空、去重；scope_self=1 排除）。空列表 = 无鉴权态。</summary>
+        /// <summary>生效配置条目 _mcp_token / Password 并集（`;` 拆分、去空、去重；scope_self=1 排除；Password 非空优先）。
+        /// 空列表 = 无鉴权态。</summary>
         public static List<string> CollectTokens(IEnumerable<PwDatabase> dbs)
         {
             var set = new List<string>();
             foreach (PwEntry e in EffectiveConfigEntries(dbs))
             {
-                string v = ReadMcpField(e, TokenField);
+                string v = ReadToken(e);
                 if (string.IsNullOrWhiteSpace(v)) continue;
                 foreach (string part in v.Split(';'))
                 {
@@ -256,7 +268,10 @@ namespace KeePassMCP.Core
                 entry.Strings.Set(ConfigFlag, new ProtectedString(false, "1"));
                 entry.Strings.Set(ServerFlag, new ProtectedString(false, "1"));
                 entry.Strings.Set(ListeningField, new ProtectedString(false, DefaultListening));
-                entry.Strings.Set(TokenField, new ProtectedString(true, GenerateRandomToken()));
+                // 2026-10-03：token 双字段绑定——Password 为权威输入框（KeePass 前端直接编辑），_mcp_token 为同步镜像
+                string tok = GenerateRandomToken();
+                entry.Strings.Set("Password", new ProtectedString(true, tok));
+                entry.Strings.Set(TokenField, new ProtectedString(true, tok));
                 entry.Strings.Set(ReadDefault, new ProtectedString(false, "1"));
                 entry.Strings.Set(ReadProtectedDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(WriteDefault, new ProtectedString(false, "1"));
@@ -284,6 +299,45 @@ namespace KeePassMCP.Core
             var bytes = new byte[32];
             using (var rng = new RNGCryptoServiceProvider()) rng.GetBytes(bytes);
             return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
+        }
+
+        /// <summary>token 双字段同步（2026-10-03 需求：绑定 Password 输入框 + 两字段同步）：
+        /// Password 为权威输入框（KeePass 前端直接编辑），_mcp_token 为机器可读镜像。
+        /// Password 非空且与 _mcp_token 不一致 → 用 Password 覆盖 _mcp_token（内存同步；读取时 Password 已优先，无需落盘）；
+        /// Password 为空 → 保留 _mcp_token（旧条目回退路径，兼容自动创建前的配置）。</summary>
+        public static void SyncTokenFields(IEnumerable<PwDatabase> dbs)
+        {
+            if (dbs == null) return;
+            foreach (PwEntry e in FindConfigEntries(dbs))
+            {
+                try
+                {
+                    string pw = ReadPasswordValue(e);
+                    string mcp = ReadMcpField(e, TokenField);
+                    if (string.IsNullOrWhiteSpace(pw) || string.Equals(pw, mcp, StringComparison.Ordinal)) continue;
+                    e.Strings.Set(TokenField, new ProtectedString(true, pw));
+                    Log.Write($"配置条目 {SafeEntryTitle(e)} 的 _mcp_token 已与 Password 同步");
+                }
+                catch (Exception ex) { Log.Write("SyncTokenFields failed: " + ex.Message); }
+            }
+        }
+
+        private static string ReadPasswordValue(PwEntry entry)
+        {
+            if (entry == null || entry.Strings == null) return null;
+            try
+            {
+                ProtectedString pw = entry.Strings.Get("Password");
+                if (pw == null) return null;
+                string v = pw.ReadString();
+                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+            }
+            catch { return null; }
+        }
+
+        private static string SafeEntryTitle(PwEntry entry)
+        {
+            try { return entry.Strings.ReadSafe("Title") ?? ""; } catch { return ""; }
         }
 
         private static string SafeDbName(PwDatabase db)
