@@ -1,0 +1,68 @@
+<html style="margin:0;padding:0;">
+<title>KeePassMCP P0-P8 项目复盘</title>
+<div style="width:100%;box-sizing:border-box;font-family:'Segoe UI',sans-serif;padding:16px;background:#f7f8fa;color:#1f2329;">
+  <div style="font-size:20px;font-weight:600;margin-bottom:4px;">KeePassMCP P0 → P8 项目复盘</div>
+  <div style="font-size:13px;color:#646a73;margin-bottom:14px;">2026-10-01 → 2026-10-03 · 库内配置 MCP 插件 · 真实库逐轮实测</div>
+
+  <!-- 里程碑时间线 -->
+  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;">
+    <span style="background:#e8f3ff;color:#165dff;border-radius:10px;padding:4px 10px;font-size:12px;">P0 探路</span>
+    <span style="background:#e8f3ff;color:#165dff;border-radius:10px;padding:4px 10px;font-size:12px;">P1 只读+掩码</span>
+    <span style="background:#e8f3ff;color:#165dff;border-radius:10px;padding:4px 10px;font-size:12px;">P2 写+dry-run</span>
+    <span style="background:#fff3e8;color:#d25f00;border-radius:10px;padding:4px 10px;font-size:12px;">P3/P4 弹窗审批（后废止）</span>
+    <span style="background:#e8f3ff;color:#165dff;border-radius:10px;padding:4px 10px;font-size:12px;">P5 语义修复</span>
+    <span style="background:#eaffea;color:#00855a;border-radius:10px;padding:4px 10px;font-size:12px;">P6-3 字段体系（用户拍板）</span>
+    <span style="background:#eaffea;color:#00855a;border-radius:10px;padding:4px 10px;font-size:12px;">P7 配置页注入</span>
+    <span style="background:#eaffea;color:#00855a;border-radius:10px;padding:4px 10px;font-size:12px;">P8 专属样式</span>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:stretch;">
+    <!-- 做对 -->
+    <div style="flex:1 1 340px;min-width:300px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:14px;border-left:4px solid #00a854;">
+      <div style="font-size:15px;font-weight:600;color:#00855a;margin-bottom:10px;">做对的地方</div>
+      <div style="font-size:13px;line-height:1.7;">
+        <div><b>探针自动化</b>：42 → 238 断言，部署前全绿为最低门槛</div>
+        <div><b>反射探路先行</b>：SaveDatabase / 私有 TabControl / 无 CustomColor 三处实证</div>
+        <div><b>掩码三层铁律</b>：协议/实现/数据层，明文唯一出口需授权</div>
+        <div><b>dry-run 零副作用</b>：预览与执行共用变更计算</div>
+        <div><b>决策落盘</b>：ADR-0001/2/3 + HANDOFF 每阶段回写</div>
+        <div><b>真实库验证</b>：token 轮换/权限/注入/样式逐轮用户实测</div>
+        <div><b>小步提交</b>：工作区长期干净，任何一步可回退</div>
+      </div>
+    </div>
+    <!-- 做错 -->
+    <div style="flex:1 1 340px;min-width:300px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:14px;border-left:4px solid #d25f00;">
+      <div style="font-size:15px;font-weight:600;color:#d25f00;margin-bottom:10px;">做不对的地方（教训）</div>
+      <div style="font-size:13px;line-height:1.7;">
+        <div><b>P3/P4 弹窗审批整体废止</b>：访谈未深挖"字段即授权"主选项，最贵的一次弯路</div>
+        <div><b>UI 布局六轮返工</b>：固定像素列必溢出；AutoSize/Percent 一次解决</div>
+        <div><b>强杀丢未保存改动 ×2</b>：部署第一步必须是"先保存库"</div>
+        <div><b>三态复选框语义坑</b>：灰色=未设置 ≠ 拒绝，写入权限"看似已取消"</div>
+        <div><b>token 双向同步两轮返工</b>：单向先行，"绑定输入框"未先澄清双向</div>
+        <div><b>README 滞后 3 阶段</b>：HANDOFF 同步了，README 停在 P5</div>
+        <div><b>P8 按钮多余（用户评审）</b>：先问"能不能自动"再决定交互入口</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 量化 -->
+  <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;">
+    <div style="flex:1 1 150px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:22px;font-weight:700;color:#165dff;">25+</div>
+      <div style="font-size:12px;color:#646a73;">语义化提交</div>
+    </div>
+    <div style="flex:1 1 150px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:22px;font-weight:700;color:#165dff;">42→238</div>
+      <div style="font-size:12px;color:#646a73;">探针断言全绿</div>
+    </div>
+    <div style="flex:1 1 150px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:22px;font-weight:700;color:#165dff;">10+</div>
+      <div style="font-size:12px;color:#646a73;">部署/重启验证轮次</div>
+    </div>
+    <div style="flex:1 1 150px;background:#fff;border:1px solid #d8dbe0;border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:22px;font-weight:700;color:#165dff;">全绿</div>
+      <div style="font-size:12px;color:#646a73;">真实库端到端（每次实测）</div>
+    </div>
+  </div>
+</div>
+</html>
