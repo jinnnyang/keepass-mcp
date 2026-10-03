@@ -360,6 +360,14 @@ namespace P1Probe.Tools
             Check("p2 create_group ok", Ok(env));
             string subUuid = GetGroupUuid(db, "Sub");
             Check("p2 create_group 生效", subUuid != null);
+            // create_group 真跑回填真实组 uuid（changes[0].target.uuid == 实际组 uuid，非预览占位）
+            string json2 = JsonSerializer.Serialize(env);
+            using (JsonDocument d2 = JsonDocument.Parse(json2))
+            {
+                string tgt = d2.RootElement.GetProperty("data").GetProperty("changes")[0]
+                    .GetProperty("target").GetProperty("uuid").GetString();
+                Check("p2 create_group 响应真实 uuid", subUuid != null && string.Equals(tgt, subUuid, StringComparison.OrdinalIgnoreCase));
+            }
             env = WriteHandlers.RenameGroup(db, subUuid, "Sub2", false);
             Check("p2 rename_group ok", Ok(env) && FindGroupByName(db, "Sub2") != null);
 

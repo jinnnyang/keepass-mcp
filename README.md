@@ -152,6 +152,8 @@ mcp_servers:
 
 - **响应头声明 UTF-8**：所有响应 `Content-Type: application/json; charset=utf-8`，客户端按 UTF-8 解码（勿按 Latin-1）。
 - **list_entries**：缺省 `group_uuid` 返回根组直接条目；`recursive=true` 全库平铺（含全部子组条目，每条带 `group_path` 供聚合）。
+- **uuid/计数**：所有 uuid 服务端统一大写 hex 输出，**查找大小写不敏感**；`list_groups` 的 `entry_count` 含全部子组条目（递归计数）。
+- **响应语义**：`move_entry` 已在目标组 → `no_op`（error 形态，实为已满足）；`create_group` 真跑响应 `changes[0].target.uuid`=真实组 uuid（dry-run 为占位）。**无 `delete_entry`**——删单条/批量用 临时组 + move + delete_group 模式。
 - **配置条目**：读出口整条目掩码（`title=[protected]`、`protected_field_names=["*"]`），同时携带非敏感标志 `is_config_entry=true`，客户端可编程跳过/标注。
 
 命令行快速验证（PowerShell）：

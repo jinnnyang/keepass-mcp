@@ -286,6 +286,8 @@ namespace KeePassMCP.Core
                 {
                     PwGroup g = new PwGroup(true, true, name, PwIcon.Folder);
                     parent.AddGroup(g, true);
+                    // 执行后回填真实组 uuid（与 create_entry 的 entry_uuid 对齐；dry-run 保持占位预览 uuid）
+                    ((Dictionary<string, object>)change["target"])["uuid"] = g.Uuid.ToHexString();
                 },
                 new Dictionary<string, object> { ["parent_group_uuid"] = parentGroupUuid, ["name"] = name });
         }
