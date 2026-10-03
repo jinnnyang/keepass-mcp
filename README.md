@@ -2,18 +2,19 @@
 
 **KeePass 原生 MCP 插件**：对本机暴露 MCP 服务（Streamable HTTP），本地 Agent 连接后**可见/可操作除掩码字段外的所有字段**——重新分类、重新命名、整理元数据，密码等受保护字段在协议层、实现层、数据层三层不可达。
 
-> 状态：**P0–P5 完成（P5：dry-run 审批语义修复——预览不弹窗、保护字段掩码；逻辑探针 143/143；真实测试库集成验证全绿）**。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
+> 状态：**P0–P8 完成（2026-10-03）**——只读/写/审计/备份、库内配置字段体系（`_mcp_*`）、token 双字段双向同步、保存数据库、MCP Server Config 可视化配置页（条目表单注入 tab）、配置条目专属图标/颜色（保存时全量应用）。逻辑探针 238/238；真实库端到端验证全绿。设计见 [docs/DESIGN.md](docs/DESIGN.md)；**实施请读 [docs/HANDOFF.md](docs/HANDOFF.md)**（自包含规格：工具/资源/掩码/安全/验收标准）；词表与决策见 [CONTEXT.md](CONTEXT.md) / [docs/adr/](docs/adr/)。
 
 ## 一句话定位
 
-KeePass 进程内嵌 MCP 门卫：按 KDBX `Protect` 标志自动掩码，Agent 默认只能读写元数据（标题/URL/备注/自定义字段/分组/标签）；创建条目时可写入密钥，读取/修改已有密钥需审批（白名单/弹窗），明文永不进入常规读出口。
+KeePass 进程内嵌 MCP 门卫：按 KDBX `Protect` 标志自动掩码，Agent 默认只能读写元数据（标题/URL/备注/自定义字段/分组/标签）；创建条目时可写入密钥，读取/修改已有密钥由**条目字段授权**（`_mcp_read` / `_mcp_write` 等，配置条目聚合），明文永不进入常规读出口。
 
 ## 核心设计
 
 - **掩码边界**：`Protect="True"` 字段 → 不可见（输出 `[protected]`）、不可操作（工具 schema 不含、实现层拒绝）
-- **传输**：Streamable HTTP，仅绑定 `127.0.0.1` 回环 + Bearer token 鉴权
+- **传输**：Streamable HTTP，仅绑定 `127.0.0.1` 回环 + Bearer token 鉴权（token 由配置页重新生成，双字段同步到库内）
 - **写保护**：所有写工具支持 `dry_run=true` 变更预览（与执行共用同一变更计算函数）；破坏性操作需 `confirm=true`；变更前自动备份 + 审计日志
-- **密钥边界**：创建新条目可写入密钥（免审批）；读取/修改已有密钥需审批（白名单免审批 + KeePass 弹窗，超时拒绝）；读出口/审计/备份永不含明文
+- **密钥边界**：创建新条目可写入密钥（免审批）；读/改已有密钥按条目 `_mcp_*` 字段授权（读受保护字段需 `_mcp_read_protected`，改需 `_mcp_write_protected` 等）；读出口/审计/备份永不含明文
+- **配置**：库内配置条目（`_mcp_config=1`，标题任意、可多条目并集）承载监听/鉴权/默认权限；无配置条目时自动创建 `MCPServerConfiguration`
 - **锁库联动**：KeePass 锁定即拒绝一切读写
 
 ## 架构
@@ -31,8 +32,9 @@ flowchart LR
 
 ## MCP 工具（设计）
 
-- 只读：`list_databases` / `list_groups` / `list_entries` / `get_entry` / `search_entries` / `get_audit_log`
-- 写（元数据）：`rename_entry` / `update_entry_fields` / `move_entry` / `create_group` / `rename_group` / `delete_group` / `add_tag` / `remove_tag` / `create_entry` / `backup_database`
+- 只读：`list_databases` / `list_groups` / `list_entries` / `get_entry` / `search_entries` / `get_audit_log`（后两项需 `_mcp_audit_default=1`）
+- 写（元数据）：`rename_entry` / `update_entry_fields` / `move_entry` / `create_group` / `rename_group` / `delete_group` / `add_tag` / `remove_tag` / `create_entry` / `restore_backup`（需 `_mcp_backup_default=1`）/ `save_database`（需 `_mcp_save_default=1`，默认拒绝）
+- 密钥：`read_secret`（需 `_mcp_read_protected` 授权；明文仅此工具可出）
 - 资源：`keepass://groups`、`keepass://entries/{uuid}`、`keepass://audit` 等
 
 ## 安装
@@ -54,16 +56,28 @@ flowchart LR
 
 ## 配置
 
-配置文件 `%APPDATA%\KeePassMCP\config.json`（可用环境变量 `KeePassMCP_DATA_DIR` 覆盖数据目录），也可用菜单 **工具 → KeePassMCP 配置...** 可视化编辑：
+配置分两层：**库内配置条目**（主，P6-3/P7）与 `%APPDATA%\KeePassMCP\config.json`（辅，仅附加掩码字段）。
+
+### 库内配置条目（推荐，可视化）
+
+- 任意条目加字符串字段 `_mcp_config=1` 即成为**配置条目**（标题不限，多条目取并集；普通条目标题为 `MCPServerConfiguration` 时可一键识别——保存时自动套用专属图标/浅绿背景）。
+- 打开配置条目 → **MCP Server Config** tab（P7 注入的可视化页）：服务开关、监听地址（`;` 分隔多地址，端口占用自动 +1）、鉴权 token（可重新生成，双字段同步到 Password 输入框）、九项默认权限三态、作用域开关。
+- 核心字段（也可在 Advanced → String Fields 手写）：
+  - `_mcp_server=1` 启用监听 / `_mcp_server=0` 停止；`_mcp_listening=127.0.0.1:6789;0.0.0.0:8080`
+  - `_mcp_token`（与 `Password` 双向同步）——token 并集，任一匹配放行；**并集为空 → 无鉴权（仅回环建议）**
+  - 默认权限：`_mcp_read_default` / `_mcp_read_protected_default` / `_mcp_write_default` / `_mcp_write_protected_default` / `_mcp_move_default` / `_mcp_list_default` / `_mcp_audit_default` / `_mcp_backup_default` / `_mcp_save_default`（0/1；跨配置条目布尔**最严聚合**——任一 0 拒）
+  - `_mcp_scope_self=1`：本条目不并入全局并集/聚合
+- 普通条目的权限字段：`_mcp_read` / `_mcp_read_protected` / `_mcp_write` / `_mcp_write_protected` / `_mcp_move` / `_mcp_list`（`_mcp_list=0` → 对 MCP 客户端隐身）。优先级：条目显式字段 → 配置条目 default 最严聚合 → 内置硬编码。
+- 无任何配置条目时，插件自动创建 `MCPServerConfiguration`（根组、回环 127.0.0.1:6789、随机 token、默认权限）；已有配置条目时**绝不覆盖/补字段**。
+- `_mcp_` 前缀为保留字段：MCP 写入一律拒绝（`reserved_field`），读出口整条目掩码。
+
+### config.json（辅）
+
+`%APPDATA%\KeePassMCP\config.json`（可用环境变量 `KeePassMCP_DATA_DIR` 覆盖数据目录）：
 
 | 键 | 类型 | 说明 |
 |---|---|---|
-| `secret_whitelist` | string[] | 密钥访问白名单：条目 UUID 数组；命中条目对 `read_secret` / 保护字段更新**免审批**，全程审计 |
-| `extraMaskedFields` | string[] | 附加敏感字段名：这些字段在掩码第一层（Password 硬掩码）与第二层（IsProtected 标志）之外再强制掩码 |
-| `confirm_writes` | bool | 全局"写需确认"开关：`true` 时所有写工具需传 `confirm:true` 才执行 |
-
-- 条目 UUID 获取：调用 `get_entry` 响应中的 `uuid` 字段，或 `read_secret`/`update` 的审计记录。
-- 白名单 UUID 格式：32 位十六进制（可含连字符，配置 UI 会自动归一化）。
+| `extraMaskedFields` | string[] | 附加敏感字段名：这些字段在 `Protect` 标志之外再强制掩码 |
 
 ## 连接与快速验证
 
@@ -82,6 +96,8 @@ flowchart LR
 ```
 
 标准 MCP 客户端（moirai 等）按 `mcp_client` 段配置即可（Streamable HTTP + Bearer token，仅 127.0.0.1 回环）。
+
+> token 管理：`connection.json` 的 token 即库内配置条目的鉴权 token（每次启动同步）。在 KeePass 里打开配置条目 → MCP Server Config tab →「重新生成」可轮换（双字段同步，旧 token 即刻失效）。
 
 ### agent 端接入示例（如何声明这个 MCP server）
 
@@ -144,11 +160,11 @@ curl.exe -X POST "http://127.0.0.1:$port/mcp" -H "Authorization: Bearer $tok" `
 ## 安全使用须知
 
 - **掩码**：`Password` 恒输出 `[protected]`；库内 `Protect="True"` 字段与配置 `extraMaskedFields` 同样掩码；`UserName` 默认可见。任何读出口、审计、备份不含明文。
-- **审批**：`read_secret`（读取明文一次）/ `update_entry_fields`（含保护字段）——白名单条目免审批；否则 KeePass 弹窗（显示库名/条目标题/字段名），60s 超时自动拒绝，拒绝/超时返回 `approval_denied` / `approval_timeout` 且无明文。
+- **字段即授权**（ADR-0003）：普通条目的 `_mcp_read/_mcp_write/...` 字段显式授权；无字段 → 配置条目 default 最严聚合 → 内置默认（读写元数据允许、读/写受保护字段拒绝、audit/backup/save 拒绝）。受保护字段明文**永不出口**（无 read_secret 审批出口）。
 - **dry-run**：所有写工具支持 `dry_run=true` 预览（零副作用：不落库/不备份/不审计）；含保护字段的预览一律掩码。
-- **审计与备份**：写执行、密钥访问（只记字段名）、审批事件全部记入 `audit.jsonl`；写前自动备份到 `backups\`（仅非保护字段）；`restore_backup` 可回滚非保护字段（保护字段不触碰）。
+- **审计与备份**：写执行、密钥访问（只记字段名）全部记入 `audit.jsonl`；写前自动备份到 `backups\`；`restore_backup` 可回滚非保护字段（保护字段不触碰）。审计/备份权限默认拒绝，需配置条目 `_mcp_audit_default=1` / `_mcp_backup_default=1`。
 - **锁定联动**：KeePass 锁定库后，该库一切请求返回 `database_locked`。
-- **明文唯一出口**：审批通过的 `read_secret` 响应一次；如需将密钥写回 Agent，建议优先 `create_entry` 的 `generate_password`（插件内生成，明文不经 Agent 上下文）。
+- **明文唯一路径**：创建条目时写入密钥（`fields` 直填或 `generate_password` 插件内生成）；已有密钥的明文在任何读出口不可达。
 
 ## 目录
 
@@ -157,7 +173,7 @@ keepass-mcp/
 ├── CONTEXT.md          # 领域词表（保护字段/掩码/密钥访问审批等）
 ├── docs/DESIGN.md      # 设计方案（决策记录）
 ├── docs/HANDOFF.md     # ★实施交接文档（编码会话直接读这份）
-├── docs/adr/           # ADR-0001 密钥边界模型 / ADR-0002 审批机制
+├── docs/adr/           # ADR-0001 密钥边界模型 / ADR-0002 审批机制 / ADR-0003 字段权限模型
 ├── src/                # 插件工程 + P0/P1 探针（KeePassMCP.sln：KeePassMCP、P0Probe.*、P1Probe.Tools）
 └── README.md
 ```
@@ -167,9 +183,10 @@ keepass-mcp/
 - 2026-10-01 掩码：仅按 `Protect` 标志，UserName 不加入默认掩码（可见可操作），配置可追加
 - 2026-10-01 dry-run：写操作需预览，预览与执行共用同一变更计算函数
 - 2026-10-01 连接：标准 MCP 客户端配置（`type: http` + Bearer token）
-- 2026-10-01 密钥边界（访谈定稿）：创建可写密钥、读改需审批、明文永不外泄（ADR-0001/0002）
-- 2026-10-01 客户端/自主权/落盘：通用标准客户端；写自主白名单 + 全局确认开关；默认手动保存
+- 2026-10-01 密钥边界（访谈定稿 Q1 三态）：创建可写密钥、读改需授权、明文永不外泄（ADR-0001/0002 → ADR-0003 字段权限模型）
+- 2026-10-03 ADR-0003（用户拍板）：审批弹窗/白名单/secret_whitelist 全部废止 → 库内 `_mcp_*` 字段体系（字段即授权、布尔最严聚合、scope_self、token 并集）；token 绑定 Password 输入框双字段双向同步；配置条目自动创建与专属样式
+- 2026-10-03 客户端/自主权/落盘：通用标准客户端；默认手动保存 + 显式 `save_database`（默认拒绝闸门 + 保存前快照）
 
 ## 下一步
 
-**P0**（SDK/HttpListener/插件加载/掩码 API）、**P1 只读**、**P2 写操作**、**P3 密钥访问**（read_secret + 白名单 + KeePass UI 弹窗审批 60s 超时拒绝 + update 保护字段审批 + restore_backup + 并发；真实测试库集成验证全绿含用户点"允许"弹窗审批）、**P4 配置 UI**（菜单 工具→KeePassMCP 配置 + 弹窗倒计时 + 多库路由验证）与 **P5 收尾**（dry-run 审批语义修复：预览不弹窗、保护字段掩码；探针 143/143）均已完成（2026-10-02）。剩余人工确认项见 [docs/DESIGN.md](docs/DESIGN.md) §12（锁定态、UI 可见变化、配置窗口/弹窗目视）。
+**P0–P8 全部完成（2026-10-03）**：只读/写/审计/备份 → 库内配置字段体系 → token 双字段双向同步 → save_database → MCP Server Config 可视化配置页（条目表单注入）→ 配置条目专属样式（保存时全量应用）。逻辑探针 238/238；真实库验证全绿。可选后续：打成 `.plgx` 单文件发布包（见 docs/HANDOFF.md §9.10）；Agent 端示例配置接入文档已在本 README §连接。
