@@ -818,6 +818,9 @@ namespace P1Probe.Tools
                 created != null && LibraryConfig.IsConfigEntry(created) && LibraryConfig.IsServerEnabled(created));
             Check("p6 默认条目监听默认",
                 created != null && LibraryConfig.ReadMcpField(created, LibraryConfig.ListeningField) == LibraryConfig.DefaultListening);
+            Check("p8 自动创建条目专属图标", created != null && created.IconId == LibraryConfig.ConfigIcon);
+            Check("p8 自动创建条目专属颜色",
+                created != null && created.CustomData.Get("_color") == LibraryConfig.ConfigIconColor);
             Check("p6 默认条目 token 非空保护（Password 绑定）",
                 created != null && LibraryConfig.ReadToken(created) != null
                 && created.Strings.Get("Password").IsProtected);

@@ -51,6 +51,24 @@ namespace KeePassMCP.Core
         public const string DefaultConfigTitle = "MCPServerConfiguration";
         public const string DefaultListening = "127.0.0.1:6789";
 
+        // ---------- 配置条目专属样式（P8：列表一眼识别） ----------
+        public const string ConfigIconColor = "#96FFB4";      // 浅绿（KeePass 条目颜色 CustomData 保留键 _color，hex）
+        public const PwIcon ConfigIcon = PwIcon.NetworkServer; // 服务器图标
+        private const string ColorDataKey = "_color";          // KeePass 条目颜色存储键（UI 层 CustomData）
+
+        /// <summary>对配置条目应用专属图标/颜色（仅作用于调用时传入的条目；自动创建与"应用样式"按钮共用）。
+        /// 颜色经 CustomData 保留键 _color（PwEntry 无 CustomColor 属性，KeePass 颜色是 UI 层特性）。</summary>
+        public static void ApplyConfigStyle(PwEntry entry)
+        {
+            if (entry == null) return;
+            try
+            {
+                entry.IconId = ConfigIcon;
+                entry.CustomData.Set(ColorDataKey, ConfigIconColor);
+            }
+            catch (Exception ex) { Log.Write("ApplyConfigStyle failed: " + ex.Message); }
+        }
+
         // ---------- 识别 ----------
         /// <summary>是否 _mcp_ 保留字段（create/update 一律拒绝该前缀；读出口一律掩码）。</summary>
         public static bool IsMcpField(string name) =>
@@ -290,6 +308,7 @@ namespace KeePassMCP.Core
                 entry.Strings.Set(BackupDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(SaveDefault, new ProtectedString(false, "0"));
                 entry.Strings.Set(ScopeSelfField, new ProtectedString(false, "0"));
+                ApplyConfigStyle(entry);   // P8：专属图标/颜色（列表一眼识别）
                 db.RootGroup.AddEntry(entry, true); // 必须显式 AddEntry（P2 教训）
                 db.Modified = true;
                 Log.Write($"自动创建默认 MCP 配置条目 {DefaultConfigTitle}（{SafeDbName(db)}），监听 {DefaultListening}，随机 token");
