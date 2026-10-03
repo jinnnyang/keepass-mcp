@@ -28,8 +28,6 @@ namespace KeePassMCP.UI
         {
             Text = "重新生成", AutoSize = false, Dock = DockStyle.Fill
         };
-        private readonly Button _btnStyle = new Button { Text = "应用专属图标/颜色", AutoSize = true };
-        private bool _applyStyle;   // P8：EntrySaved 钩子中应用（避免 PwEntryForm 副本覆盖）
         private readonly CheckBox _cbScopeSelf = new CheckBox { Text = "此配置条目不并入全局集", AutoSize = true };
 
         private readonly (CheckBox Cb, string Field, string Label, string Tip)[] _defaults =
@@ -121,12 +119,6 @@ namespace KeePassMCP.UI
             // 作用域
             if (_cbScopeSelf.Checked) SetField(entry, LibraryConfig.ScopeSelfField, "1");
             else RemoveField(entry, LibraryConfig.ScopeSelfField);
-            // P8：专属图标/颜色（标记后在 EntrySaved 阶段应用，随库保存落盘）
-            if (_applyStyle)
-            {
-                LibraryConfig.ApplyConfigStyle(entry);
-                _applyStyle = false;
-            }
         }
 
         // ---------- 布局 ----------
@@ -242,13 +234,6 @@ namespace KeePassMCP.UI
             var g = new GroupBox { Text = "作用域", Dock = DockStyle.Fill };
             var p = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 6) };
             p.Controls.Add(_cbScopeSelf);
-            p.Controls.Add(_btnStyle);
-            _btnStyle.Click += (s, e) =>
-            {
-                _applyStyle = true;
-                _btnStyle.Text = "已标记（点 OK 保存生效）";
-                _btnStyle.Enabled = false;
-            };
             g.Controls.Add(p);
             return g;
         }

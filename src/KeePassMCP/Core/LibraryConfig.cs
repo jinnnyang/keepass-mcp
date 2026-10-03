@@ -56,8 +56,7 @@ namespace KeePassMCP.Core
         public const PwIcon ConfigIcon = PwIcon.NetworkServer; // 服务器图标
         private const string ColorDataKey = "_color";          // KeePass 条目颜色存储键（UI 层 CustomData）
 
-        /// <summary>对配置条目应用专属图标/颜色（仅作用于调用时传入的条目；自动创建与"应用样式"按钮共用）。
-        /// 颜色经 CustomData 保留键 _color（PwEntry 无 CustomColor 属性，KeePass 颜色是 UI 层特性）。</summary>
+        /// <summary>对配置条目应用专属图标/颜色（仅作用于调用时传入的条目；自动创建与保存前全量应用共用）。</summary>
         public static void ApplyConfigStyle(PwEntry entry)
         {
             if (entry == null) return;
@@ -67,6 +66,27 @@ namespace KeePassMCP.Core
                 entry.CustomData.Set(ColorDataKey, ConfigIconColor);
             }
             catch (Exception ex) { Log.Write("ApplyConfigStyle failed: " + ex.Message); }
+        }
+
+        /// <summary>保存前全量应用：所有 _mcp_config=1 条目统一专属样式（幂等；用户手动改过的图标/颜色会被重置，符合"状态提示"语义）。</summary>
+        public static void ApplyConfigStylesToAll(IEnumerable<PwDatabase> dbs)
+        {
+            if (dbs == null) return;
+            foreach (PwDatabase db in dbs)
+            {
+                if (db == null || db.RootGroup == null) continue;
+                try { ApplyConfigStylesInGroup(db.RootGroup); }
+                catch (Exception ex) { Log.Write("ApplyConfigStylesToAll failed: " + ex.Message); }
+            }
+        }
+
+        private static void ApplyConfigStylesInGroup(PwGroup group)
+        {
+            foreach (PwEntry e in group.Entries)
+            {
+                if (IsConfigEntry(e)) ApplyConfigStyle(e);
+            }
+            foreach (PwGroup g in group.Groups) ApplyConfigStylesInGroup(g);
         }
 
         // ---------- 识别 ----------

@@ -142,6 +142,8 @@ namespace KeePassMCP
             if (_server == null) return;
             try { LibraryConfig.SyncTokenFields(_server.Facade.GetDatabases()); }
             catch (Exception ex) { Log.Write("SyncBeforeSave failed: " + ex.Message); }
+            try { LibraryConfig.ApplyConfigStylesToAll(_server.Facade.GetDatabases()); } // P8：保存时对全部配置条目应用专属样式
+            catch (Exception ex) { Log.Write("ApplyConfigStylesToAll failed: " + ex.Message); }
         }
 
         /// <summary>生命周期同步：有解锁库 → 启动（若未运行）或刷新 token；无 → 停止（锁库即服务停）。</summary>

@@ -821,6 +821,13 @@ namespace P1Probe.Tools
             Check("p8 自动创建条目专属图标", created != null && created.IconId == LibraryConfig.ConfigIcon);
             Check("p8 自动创建条目专属颜色",
                 created != null && created.CustomData.Get("_color") == LibraryConfig.ConfigIconColor);
+            // 保存前全量应用：手动改掉样式 → ApplyConfigStylesToAll 恢复（幂等）
+            created.IconId = PwIcon.Key;
+            created.CustomData.Set("_color", "#000000");
+            LibraryConfig.ApplyConfigStylesToAll(emptyDbs);
+            Check("p8 全量应用恢复图标", created.IconId == LibraryConfig.ConfigIcon);
+            Check("p8 全量应用恢复颜色",
+                created.CustomData.Get("_color") == LibraryConfig.ConfigIconColor);
             Check("p6 默认条目 token 非空保护（Password 绑定）",
                 created != null && LibraryConfig.ReadToken(created) != null
                 && created.Strings.Get("Password").IsProtected);
