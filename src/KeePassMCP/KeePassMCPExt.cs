@@ -25,7 +25,8 @@ namespace KeePassMCP
         private McpServerHost _server;
         private MainForm _mainWindow;
         private System.Windows.Forms.Timer _uiScanTimer;
-        private readonly HashSet<PwEntryForm> _injectedForms = new HashSet<PwEntryForm>();
+        private readonly Dictionary<PwEntryForm, McpConfigUserControl> _injectedForms =
+            new Dictionary<PwEntryForm, McpConfigUserControl>();
 
         public override bool Initialize(IPluginHost host)
         {
@@ -87,15 +88,30 @@ namespace KeePassMCP
             {
                 foreach (Form f in Application.OpenForms)
                 {
-                    if (!(f is PwEntryForm pwf) || _injectedForms.Contains(pwf)) continue;
+                    if (!(f is PwEntryForm pwf) || _injectedForms.ContainsKey(pwf)) continue;
                     PwEntry entry = null;
                     try { entry = pwf.EntryRef; } catch { }
                     if (entry == null || !LibraryConfig.IsConfigEntry(entry)) continue;
-                    InjectConfigTab(pwf, entry);
-                    _injectedForms.Add(pwf);
+                    var ctl = new McpConfigUserControl();
+                    ctl.LoadFromEntry(entry);
+                    InjectConfigTab(pwf, ctl);
+                    _injectedForms.Add(pwf, ctl);
                     pwf.FormClosed += (s2, e2) => _injectedForms.Remove(pwf);
-                    // 条目编辑保存后：配置字段可能变化 → 刷新服务鉴权/监听
-                    pwf.EntrySaved += (s2, e2) => { try { _server.RefreshToken(); } catch { } };
+                    // 条目编辑保存完成（点 OK）：写回配置字段 → 置库 Modified → 刷新服务鉴权/监听
+                    pwf.EntrySaved += (s2, e2) =>
+                    {
+                        try
+                        {
+                            if (_injectedForms.TryGetValue(pwf, out var c))
+                            {
+                                c.SaveToEntry(entry);
+                                LibraryConfig.MarkDatabaseModified(_server.Facade.GetDatabases(), entry);
+                            }
+                            _server.RefreshToken();
+                            Log.Write("P7: 配置页已保存（字段写回 + 服务刷新）");
+                        }
+                        catch (Exception ex) { Log.Write("P7 EntrySaved failed: " + ex.Message); }
+                    };
                     Log.Write("P7: 已注入 MCP Server Config tab → " + entry.Strings.ReadSafe("Title"));
                 }
             }
@@ -103,24 +119,17 @@ namespace KeePassMCP
         }
 
         /// <summary>反射注入：PwEntryForm.m_tabMain（私有 TabControl）→ 追加「MCP Server Config」页。
-        /// 占位内容验证注入点（P7-1）；失败仅日志降级，不影响 MCP 服务。</summary>
-        private void InjectConfigTab(PwEntryForm pwf, PwEntry entry)
+        /// 失败仅日志降级，不影响 MCP 服务。</summary>
+        private void InjectConfigTab(PwEntryForm pwf, McpConfigUserControl ctl)
         {
             try
             {
                 var tabControl = typeof(PwEntryForm).GetField("m_tabMain",
                     BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pwf) as TabControl;
                 if (tabControl == null) { Log.Write("P7: PwEntryForm.m_tabMain 未找到，注入降级"); return; }
-                var page = new TabPage("MCP Server Config") { Padding = new Padding(12) };
-                var lbl = new Label
-                {
-                    Dock = DockStyle.Fill,
-                    Padding = new Padding(8),
-                    Text = "此条目是 MCP Server 配置项（_mcp_config=1）。\r\n\r\n" +
-                           "监听、鉴权与权限字段的可视化配置页建设中（P7-2）。\r\n" +
-                           "当前请到 Advanced 页查看/编辑 _mcp_ 字段。"
-                };
-                page.Controls.Add(lbl);
+                var page = new TabPage("MCP Server Config") { Padding = new Padding(6) };
+                page.Controls.Add(ctl);
+                ctl.Dock = DockStyle.Fill;
                 tabControl.TabPages.Add(page);
             }
             catch (Exception ex) { Log.Write("P7 InjectConfigTab failed: " + ex.Message); }

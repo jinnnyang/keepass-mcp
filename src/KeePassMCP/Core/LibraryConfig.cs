@@ -119,6 +119,13 @@ namespace KeePassMCP.Core
             return ReadMcpField(entry, TokenField);
         }
 
+        /// <summary>标记条目所属库为已修改（P7-2：配置页 EntrySaved 写回字段后需置库 Modified 才能随库保存落盘）。</summary>
+        public static void MarkDatabaseModified(IEnumerable<PwDatabase> dbs, PwEntry entry)
+        {
+            PwDatabase db = DatabaseOf(dbs, entry);
+            if (db != null) db.Modified = true;
+        }
+
         private static bool IsFlagTrue(string v) =>
             !string.IsNullOrWhiteSpace(v) && (v.Trim() == "1" || v.Trim().Equals("true", StringComparison.OrdinalIgnoreCase));
 
