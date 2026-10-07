@@ -13,3 +13,15 @@ local/
 # OS
 Thumbs.db
 .DS_Store
+
+# Session / fetch residue
+doc-fetch-resources/
+
+# Runtime data & logs (never commit)
+*.log
+audit*.jsonl
+backups/
+config.json
+
+# Local test databases
+*.kdbx
