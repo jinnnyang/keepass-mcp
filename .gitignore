@@ -25,3 +25,6 @@ config.json
 
 # Local test databases
 *.kdbx
+
+# Release packages (built locally, published via GitHub Releases)
+release/
