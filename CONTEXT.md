@@ -42,3 +42,6 @@ _Avoid_: permission、权限（权限指 token/ACL，属鉴权概念）
 **审计日志 (Audit Log)**:
 `%APPDATA%\KeePassMCP\audit.jsonl` 的 JSONL 记录；覆盖全部写操作、密钥访问与审批事件；永不包含保护字段明文。
 _Avoid_: log
+
+**客户端技能 (Client Skill)**:
+豆包/Agent 侧配套的 KeePassMCP 使用技能，归档于 [docs/keepass-skill/](docs/keepass-skill/)：`SKILL.md`（连接、安全铁律、标准工作流）+ `references/tools.md`（18 工具全参速查与错误码）。

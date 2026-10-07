@@ -194,6 +194,7 @@ keepass-mcp/
 ├── docs/DESIGN.md      # 设计方案（决策记录）
 ├── docs/HANDOFF.md     # ★实施交接文档（编码会话直接读这份）
 ├── docs/adr/           # ADR-0001 密钥边界模型 / ADR-0002 审批机制 / ADR-0003 字段权限模型
+├── docs/keepass-skill/ # 豆包客户端配套技能（SKILL.md + references/tools.md，连接/安全铁律/18 工具参考）
 ├── src/                # 插件工程 + P0/P1 探针（KeePassMCP.sln：KeePassMCP、P0Probe.*、P1Probe.Tools）
 └── README.md
 ```
